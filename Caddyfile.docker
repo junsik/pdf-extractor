@@ -1,0 +1,23 @@
+:8080 {
+	encode gzip
+
+	# Backend routes (keep paths as-is; backend expects /api/* and /health)
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle /health {
+		reverse_proxy api:8000
+	}
+	handle /docs* {
+		reverse_proxy api:8000
+	}
+	handle /openapi.json {
+		reverse_proxy api:8000
+	}
+
+	# Frontend
+	handle {
+		reverse_proxy web:3000
+	}
+}
+

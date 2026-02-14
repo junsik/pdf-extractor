@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1
+#
+# Single-container "all-in-one" image:
+# - Caddy (single entrypoint, reverse proxy)
+# - Next.js standalone server (web)
+# - FastAPI/uvicorn (api)
+#
+# Usage:
+#   docker build -f Dockerfile.allinone -t pdf-service-aio .
+#   docker run --rm -p 8090:8080 ^
+#     -v ${PWD}/backend/data:/srv/backend/data ^
+#     -v ${PWD}/backend/uploads:/srv/backend/uploads ^
+#     -v ${PWD}/backend/logs:/srv/backend/logs ^
+#     -v ${PWD}/db:/srv/web/db ^
+#     pdf-service-aio
+
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS web_builder
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+
+# Build-time public env (inlined into client bundles by Next.js)
+ARG NEXT_PUBLIC_API_URL=""
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+RUN pnpm prisma generate
+RUN pnpm build
+
+
+FROM python:3.12-slim AS runner
+WORKDIR /srv
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install OS deps:
+# - poppler-utils: for pdf2image
+# - supervisor: run multiple processes
+# - curl/ca-certificates: download node & caddy
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    openssl \
+    poppler-utils \
+    supervisor \
+  ; \
+  rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20.x (Debian)
+RUN set -eux; \
+  apt-get update; \
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+  apt-get install -y --no-install-recommends nodejs; \
+  rm -rf /var/lib/apt/lists/*
+
+# Install caddy (single static binary)
+# buildx provides TARGETARCH (amd64/arm64)
+ARG TARGETARCH
+RUN set -eux; \
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${TARGETARCH}" -o /usr/bin/caddy; \
+  chmod +x /usr/bin/caddy; \
+  /usr/bin/caddy version
+
+# Backend deps
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# App files
+COPY backend /srv/backend
+COPY Caddyfile.allinone /srv/Caddyfile
+COPY supervisord.allinone.conf /etc/supervisor/conf.d/allinone.conf
+
+# Web standalone output
+COPY --from=web_builder /app/.next/standalone /srv/web
+COPY --from=web_builder /app/.next/static /srv/web/.next/static
+COPY --from=web_builder /app/public /srv/web/public
+COPY --from=web_builder /app/prisma /srv/web/prisma
+COPY --from=web_builder /app/db /srv/web/db
+
+RUN mkdir -p /srv/backend/data /srv/backend/uploads /srv/backend/logs
+
+EXPOSE 8080
+
+CMD ["supervisord", "-n"]

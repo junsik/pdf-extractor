@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      DEBUG: "false"
+      DB_URL: "sqlite+aiosqlite:///./data/registry.db"
+      # pydantic-settings parses this as JSON for list fields
+      CORS_ORIGINS: "[\"http://localhost:8090\",\"http://127.0.0.1:8090\"]"
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 15
+
+  web:
+    build:
+      context: .
+      args:
+        # Empty string => same-origin calls to /api/* via Caddy
+        NEXT_PUBLIC_API_URL: ""
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "file:./db/custom.db"
+    volumes:
+      - ./db:/app/db
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+      - api

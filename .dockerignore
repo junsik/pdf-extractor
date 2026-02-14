@@ -1,0 +1,19 @@
+Dockerfile
+.dockerignore
+node_modules
+npm-debug.log
+README.md
+.next
+.git
+package-lock.json
+yarn.lock
+test
+*.log
+local-*
+
+# backend build artifacts / local state
+backend/.venv
+backend/__pycache__
+backend/data
+backend/logs
+backend/uploads
