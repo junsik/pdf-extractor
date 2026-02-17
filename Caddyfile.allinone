@@ -1,11 +1,18 @@
 :8080 {
 	encode gzip
 
-	# Backend routes first
-	handle /api/* {
+	# Health check - no auth (for Docker healthcheck)
+	handle /health {
 		reverse_proxy 127.0.0.1:8000
 	}
-	handle /health {
+
+	# All other routes require Basic Auth
+	basicauth {
+		admin $2a$14$g83lZ2f7l4ai6thtX0UdZOZYaihsRuhTDyqhnKOsl1RlZaZ6jajkK
+	}
+
+	# Backend routes
+	handle /api/* {
 		reverse_proxy 127.0.0.1:8000
 	}
 	handle /docs* {

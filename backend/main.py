@@ -5,7 +5,7 @@ import os
 import io
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -232,6 +232,24 @@ async def parse_pdf(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail="크레딧이 부족합니다. 요금제를 업그레이드 해주세요."
         )
+
+    # 일일 파싱 한도 확인
+    plan_key = current_user.plan.value if current_user.plan else "free"
+    daily_limit = settings.PRICING.get(plan_key, {}).get("daily_limit", 3)
+    if daily_limit != -1:
+        today_start = datetime.combine(date.today(), datetime.min.time())
+        today_count_result = await session.execute(
+            select(func.count(ParseRecord.id)).where(
+                ParseRecord.user_id == current_user.id,
+                ParseRecord.created_at >= today_start
+            )
+        )
+        today_count = today_count_result.scalar() or 0
+        if today_count >= daily_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"일일 파싱 한도({daily_limit}회)를 초과했습니다. 내일 다시 시도하거나 요금제를 업그레이드 해주세요."
+            )
 
     # 파싱 기록 생성
     parse_record = ParseRecord(

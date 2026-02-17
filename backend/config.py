@@ -48,18 +48,21 @@ class Settings(BaseSettings):
             "name": "무료",
             "price": 0,
             "credits": 3,  # 월 3회
+            "daily_limit": 3,  # 일 3회
             "features": ["기본 파싱", "데모 결과", "Webhook 미지원"]
         },
         "basic": {
             "name": "베이직",
             "price": 9900,
             "credits": 10,  # 월 10회
+            "daily_limit": 30,  # 일 30회
             "features": ["전체 파싱", "상세 결과", "Webhook 지원", "API 액세스"]
         },
         "pro": {
             "name": "프로",
             "price": 29900,
             "credits": -1,  # 무제한
+            "daily_limit": -1,  # 무제한
             "features": ["무제한 파싱", "우선 처리", "Webhook 지원", "API 액세스", "전담 지원"]
         }
     }
