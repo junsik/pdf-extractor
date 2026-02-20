@@ -51,8 +51,10 @@
 │   │   ├── routers/            # auth, parse, payment, user, products, health
 │   │   └── schemas/            # API 요청/응답 DTO
 │   └── tools/                  # 독립 실행 도구
-│       ├── admin.py            # 관리자 CLI
-│       └── benchmark.py        # 파서 벤치마크
+│       ├── admin.py            # 관리자 CLI (DB 조회/관리)
+│       ├── benchmark.py        # 파서 벤치마크 (정확도 측정)
+│       ├── cli.py              # 파서 CLI (PDF 파싱 + 출력)
+│       └── analyze_pdf.py      # PDF 구조 분석 (디버깅)
 ├── Dockerfile.allinone         # All-in-one 이미지 빌드
 ├── Caddyfile.allinone          # Caddy 리버스 프록시 설정
 ├── supervisord.allinone.conf   # 프로세스 매니저 설정
