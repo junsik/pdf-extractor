@@ -93,6 +93,12 @@ async def signup(
     session: AsyncSession = Depends(get_session)
 ):
     """회원가입"""
+    # 회원가입 임시 차단
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="현재 회원가입이 일시 중단되었습니다. 나중에 다시 시도해주세요."
+    )
+
     # 이메일 중복 확인
     result = await session.execute(
         select(User).where(User.email == request.email)

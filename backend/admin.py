@@ -1,11 +1,12 @@
 """관리자 CLI 도구
 
 사용법:
+  [로컬]
     uv run python admin.py stats                     서비스 현황 요약
     uv run python admin.py users                     사용자 목록
     uv run python admin.py users --plan basic        플랜별 필터
     uv run python admin.py user user@example.com     사용자 상세
-    uv run python admin.py user user@example.com plan pro      플랜 변경
+    uv run python admin.py user user@example.com plan enterprise  플랜 변경
     uv run python admin.py user user@example.com credit 10     크레딧 설정
     uv run python admin.py user user@example.com credit +5     크레딧 추가
     uv run python admin.py user user@example.com disable       계정 비활성화
@@ -14,13 +15,21 @@
     uv run python admin.py parses --days 7           최근 7일
     uv run python admin.py payments                  결제 내역
     uv run python admin.py revenue                   매출 요약
+
+  [K8s 운영환경]
+    MSYS_NO_PATHCONV=1 kubectl -n app exec deploy/pdf-service-aio -- python /srv/backend/admin.py stats
+    MSYS_NO_PATHCONV=1 kubectl -n app exec deploy/pdf-service-aio -- python /srv/backend/admin.py users
+    MSYS_NO_PATHCONV=1 kubectl -n app exec deploy/pdf-service-aio -- python /srv/backend/admin.py user user@example.com
 """
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# DB 상대 경로가 올바르게 해석되도록 스크립트 위치로 이동
+os.chdir(Path(__file__).parent)
 sys.path.insert(0, str(Path(__file__).parent))
 
 from sqlalchemy import select, func, desc, and_
@@ -29,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db_session
 from models import User, ParseRecord, Payment, PlanType, UserRole, ParseStatus, PaymentStatus
+from auth import hash_password, generate_api_key
 
 
 # ==================== 유틸 ====================
@@ -238,7 +248,7 @@ async def cmd_user_plan(email: str, new_plan: str):
     try:
         plan = PlanType(new_plan)
     except ValueError:
-        print(f"잘못된 플랜: {new_plan} (free/basic/pro)")
+        print(f"잘못된 플랜: {new_plan} (free/basic/enterprise)")
         sys.exit(1)
 
     async with get_db_session() as s:
@@ -274,6 +284,42 @@ async def cmd_user_credit(email: str, amount_str: str):
             user.credits = int(amount_str)
 
     print(f"{email}: 크레딧 {fmt_credits(old_credits)} -> {fmt_credits(user.credits)}")
+
+
+async def cmd_user_password(email: str, new_password: str):
+    """비밀번호 변경"""
+    async with get_db_session() as s:
+        result = await s.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if not user:
+            print(f"사용자를 찾을 수 없습니다: {email}")
+            sys.exit(1)
+
+        user.password_hash = hash_password(new_password)
+
+    print(f"{email}: 비밀번호 변경 완료")
+
+
+async def cmd_user_create(email: str, password: str, name: str = None):
+    """사용자 생성"""
+    async with get_db_session() as s:
+        result = await s.execute(select(User).where(User.email == email))
+        if result.scalar_one_or_none():
+            print(f"이미 존재하는 이메일입니다: {email}")
+            sys.exit(1)
+
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+            name=name or email.split("@")[0],
+            role=UserRole.USER,
+            plan=PlanType.FREE,
+            credits=settings.PRICING["free"]["credits"],
+            api_key=generate_api_key(),
+        )
+        s.add(user)
+
+    print(f"사용자 생성 완료: {email}")
 
 
 async def cmd_user_toggle(email: str, enable: bool):
@@ -419,10 +465,12 @@ def main():
         epilog="""
 명령어:
   stats                              서비스 현황 요약
-  users [--plan free|basic|pro]      사용자 목록
-  user <email>                       사용자 상세
-  user <email> plan <free|basic|pro> 플랜 변경
+  users [--plan free|basic|enterprise]  사용자 목록
+  user <email>                         사용자 상세
+  user <email> plan <free|basic|enterprise> 플랜 변경
   user <email> credit <N|+N|-N>      크레딧 설정/증감
+  user <email> password <new_pw>     비밀번호 변경
+  user <email> create <password>     사용자 생성
   user <email> disable               계정 비활성화
   user <email> enable                계정 활성화
   parses [--days N]                  최근 파싱 기록 (기본 1일)
@@ -452,12 +500,21 @@ def main():
             asyncio.run(cmd_user_detail(email))
         elif args.args[1] == "plan":
             if len(args.args) < 3:
-                parser.error("플랜을 지정해주세요: admin.py user <email> plan <free|basic|pro>")
+                parser.error("플랜을 지정해주세요: admin.py user <email> plan <free|basic|enterprise>")
             asyncio.run(cmd_user_plan(email, args.args[2]))
         elif args.args[1] == "credit":
             if len(args.args) < 3:
                 parser.error("크레딧을 지정해주세요: admin.py user <email> credit <N|+N|-N>")
             asyncio.run(cmd_user_credit(email, args.args[2]))
+        elif args.args[1] == "password":
+            if len(args.args) < 3:
+                parser.error("비밀번호를 지정해주세요: admin.py user <email> password <new_pw>")
+            asyncio.run(cmd_user_password(email, args.args[2]))
+        elif args.args[1] == "create":
+            if len(args.args) < 3:
+                parser.error("비밀번호를 지정해주세요: admin.py user <email> create <password> [name]")
+            name = args.args[3] if len(args.args) > 3 else None
+            asyncio.run(cmd_user_create(email, args.args[2], name))
         elif args.args[1] == "disable":
             asyncio.run(cmd_user_toggle(email, False))
         elif args.args[1] == "enable":

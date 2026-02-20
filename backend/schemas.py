@@ -269,7 +269,7 @@ class PricingResponse(BaseModel):
 
 class PaymentRequest(BaseModel):
     """결제 요청"""
-    plan_type: str  # free, basic, pro
+    plan_type: str  # free, basic, enterprise
     success_url: str
     fail_url: str
 

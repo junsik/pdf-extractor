@@ -9,8 +9,6 @@ from typing import AsyncGenerator
 
 from config import settings
 
-# 데이터 디렉토리 생성
-os.makedirs("./data", exist_ok=True)
 os.makedirs("./uploads", exist_ok=True)
 os.makedirs("./logs", exist_ok=True)
 
@@ -18,7 +16,9 @@ os.makedirs("./logs", exist_ok=True)
 engine = create_async_engine(
     settings.DB_URL,
     echo=settings.DEBUG,
-    future=True
+    future=True,
+    pool_size=5,
+    max_overflow=10,
 )
 
 # 비동기 세션 팩토리

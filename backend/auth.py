@@ -97,8 +97,12 @@ async def get_current_user(
     if payload.get("type") != "access":
         raise credentials_exception
     
-    user_id: int = payload.get("sub")
-    if user_id is None:
+    user_id_raw = payload.get("sub")
+    if user_id_raw is None:
+        raise credentials_exception
+    try:
+        user_id = int(user_id_raw)
+    except (ValueError, TypeError):
         raise credentials_exception
     
     # 사용자 조회

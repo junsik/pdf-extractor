@@ -172,7 +172,7 @@ export default function DashboardPage() {
           </Link>
           <div className="flex items-center gap-4">
             <Badge variant={user.plan === 'free' ? 'secondary' : 'default'}>
-              {user.plan === 'free' ? '무료' : user.plan === 'basic' ? '베이직' : '프로'} 플랜
+              {user.plan === 'free' ? '무료' : user.plan === 'basic' ? '베이직' : '엔터프라이즈'} 플랜
             </Badge>
             <Link href="/pricing">
               <Button variant="ghost" size="sm">

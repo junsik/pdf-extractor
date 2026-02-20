@@ -21,7 +21,7 @@ class PlanType(str, enum.Enum):
     """요금제 타입"""
     FREE = "free"
     BASIC = "basic"
-    PRO = "pro"
+    ENTERPRISE = "enterprise"
 
 
 class ParseStatus(str, enum.Enum):

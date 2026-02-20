@@ -350,7 +350,7 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="font-medium text-lg">
-                    {user.plan === 'free' ? '무료' : user.plan === 'basic' ? '베이직' : '프로'} 플랜
+                    {user.plan === 'free' ? '무료' : user.plan === 'basic' ? '베이직' : '엔터프라이즈'} 플랜
                   </p>
                   <p className="text-sm text-muted-foreground">
                     남은 크레딧: {user.credits === -1 ? '무제한' : user.credits}회

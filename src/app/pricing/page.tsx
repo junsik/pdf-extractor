@@ -142,7 +142,7 @@ export default function PricingPage() {
             {isAuthenticated ? (
               <>
                 <Badge variant={user?.plan === 'free' ? 'secondary' : 'default'}>
-                  {user?.plan === 'free' ? '무료' : user?.plan === 'basic' ? '베이직' : '프로'} 플랜
+                  {user?.plan === 'free' ? '무료' : user?.plan === 'basic' ? '베이직' : '엔터프라이즈'} 플랜
                 </Badge>
                 <Link href="/dashboard">
                   <Button variant="ghost">대시보드</Button>
@@ -190,14 +190,14 @@ export default function PricingPage() {
                   <CardTitle className="text-2xl">{plan.name}</CardTitle>
                   <div className="mt-4">
                     <span className="text-5xl font-bold">
-                      {plan.price === 0 ? '무료' : plan.price.toLocaleString() + '원'}
+                      {plan.type === 'enterprise' ? '별도 문의' : plan.price === 0 ? '무료' : plan.price.toLocaleString() + '원'}
                     </span>
-                    {plan.price > 0 && (
+                    {plan.price > 0 && plan.type !== 'enterprise' && (
                       <span className="text-muted-foreground">/월</span>
                     )}
                   </div>
                   <p className="text-muted-foreground mt-2">
-                    월 {plan.credits === -1 ? '무제한' : plan.credits + '회'} 파싱
+                    {plan.type === 'enterprise' ? '맞춤 파싱 한도' : `월 ${plan.credits}회 파싱`}
                   </p>
                 </CardHeader>
                 <CardContent>
@@ -215,14 +215,18 @@ export default function PricingPage() {
                     className="w-full"
                     variant={plan.type === 'basic' ? 'default' : 'outline'}
                     onClick={() => handleSelectPlan(plan.type)}
-                    disabled={processingPlan !== null || (isAuthenticated && user?.plan === plan.type)}
+                    disabled={processingPlan !== null || (isAuthenticated && user?.plan === plan.type) || plan.type === 'enterprise' || (plan.type === 'basic' && plan.price > 0)}
                   >
                     {processingPlan === plan.type ? (
                       <><Loader2 className="w-4 h-4 mr-2 animate-spin" />결제 처리 중...</>
                     ) : isAuthenticated && user?.plan === plan.type ? (
                       '현재 플랜'
+                    ) : plan.type === 'enterprise' ? (
+                      '문의하기'
+                    ) : plan.type === 'basic' ? (
+                      '준비중'
                     ) : (
-                      '시작하기'
+                      '무료로 시작'
                     )}
                   </Button>
                 </CardFooter>
@@ -242,24 +246,24 @@ export default function PricingPage() {
                     <th className="text-left p-4">기능</th>
                     <th className="text-center p-4">무료</th>
                     <th className="text-center p-4 bg-blue-50 dark:bg-blue-950/20">베이직</th>
-                    <th className="text-center p-4">프로</th>
+                    <th className="text-center p-4">엔터프라이즈</th>
                   </tr>
                 </thead>
                 <tbody>
                   {[
-                    { feature: 'PDF 파싱', free: '3회', basic: '10회', pro: '무제한' },
-                    { feature: '상세 결과', free: '❌', basic: '✅', pro: '✅' },
-                    { feature: '말소사항 추적', free: '✅', basic: '✅', pro: '✅' },
-                    { feature: 'Webhook 연동', free: '❌', basic: '✅', pro: '✅' },
-                    { feature: 'API 액세스', free: '❌', basic: '✅', pro: '✅' },
-                    { feature: '우선 처리', free: '❌', basic: '❌', pro: '✅' },
-                    { feature: '전담 지원', free: '❌', basic: '❌', pro: '✅' },
+                    { feature: 'PDF 파싱', free: '10회/월', basic: '100회/월', enterprise: '맞춤' },
+                    { feature: '상세 결과', free: '❌', basic: '✅', enterprise: '✅' },
+                    { feature: '말소사항 추적', free: '✅', basic: '✅', enterprise: '✅' },
+                    { feature: 'Webhook 연동', free: '❌', basic: '✅', enterprise: '✅' },
+                    { feature: 'API 액세스', free: '❌', basic: '✅', enterprise: '✅' },
+                    { feature: '우선 처리', free: '❌', basic: '❌', enterprise: '✅' },
+                    { feature: '전담 지원', free: '❌', basic: '❌', enterprise: '✅' },
                   ].map((row, index) => (
                     <tr key={index} className="border-b last:border-0">
                       <td className="p-4 font-medium">{row.feature}</td>
                       <td className="text-center p-4">{row.free}</td>
                       <td className="text-center p-4 bg-blue-50 dark:bg-blue-950/20">{row.basic}</td>
-                      <td className="text-center p-4">{row.pro}</td>
+                      <td className="text-center p-4">{row.enterprise}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -290,7 +294,7 @@ export default function PricingPage() {
               <CardContent>
                 <p className="text-muted-foreground">
                   PDF 파일 1개를 파싱할 때마다 1크레딧이 차감됩니다.
-                  프로 플랜은 무제한으로 사용할 수 있습니다.
+                  엔터프라이즈 플랜은 별도 협의로 한도를 설정합니다.
                 </p>
               </CardContent>
             </Card>

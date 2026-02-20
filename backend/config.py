@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     
-    # 데이터베이스 설정 (환경 변수와 충돌 방지를 위해 이름 변경)
-    DB_URL: str = "sqlite+aiosqlite:///./data/registry.db"
+    # 데이터베이스 설정
+    DB_URL: str = "postgresql+asyncpg://imprun:imprun@localhost:5432/imprun"
     
     # JWT 설정
     SECRET_KEY: str = "your-super-secret-key-change-in-production-32chars"
@@ -47,23 +47,23 @@ class Settings(BaseSettings):
         "free": {
             "name": "무료",
             "price": 0,
-            "credits": 3,  # 월 3회
-            "daily_limit": 3,  # 일 3회
-            "features": ["기본 파싱", "데모 결과", "Webhook 미지원"]
+            "credits": 10,  # 월 10회
+            "daily_limit": 5,  # 일 5회
+            "features": ["월 10회 파싱", "기본 결과", "말소사항 추적"]
         },
         "basic": {
             "name": "베이직",
             "price": 9900,
-            "credits": 10,  # 월 10회
+            "credits": 100,  # 월 100회
             "daily_limit": 30,  # 일 30회
-            "features": ["전체 파싱", "상세 결과", "Webhook 지원", "API 액세스"]
+            "features": ["월 100회 파싱", "상세 결과", "Webhook 지원", "API 액세스"]
         },
-        "pro": {
-            "name": "프로",
-            "price": 29900,
-            "credits": -1,  # 무제한
-            "daily_limit": -1,  # 무제한
-            "features": ["무제한 파싱", "우선 처리", "Webhook 지원", "API 액세스", "전담 지원"]
+        "enterprise": {
+            "name": "엔터프라이즈",
+            "price": 0,
+            "credits": -1,  # 별도 협의
+            "daily_limit": -1,  # 별도 협의
+            "features": ["맞춤 파싱 한도", "우선 처리", "Webhook 지원", "API 액세스", "전담 지원"]
         }
     }
     
