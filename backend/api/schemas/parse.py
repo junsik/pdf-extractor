@@ -170,6 +170,22 @@ class TitleInfo(BaseModel):
     land_right_ratio_entries: List[LandRightRatioEntry] = Field(default=[], description="대지권 비율 항목 목록")
 
 
+class TradeListItem(BaseModel):
+    """매매목록 — 개별 부동산 항목"""
+    serial_number: str = Field(default="", description="일련번호")
+    property_description: str = Field(default="", description="부동산의 표시 (예: '[토지] 경상북도 문경시 농암면 내서리 733')")
+    rank_number: str = Field(default="", description="순위번호")
+    registration_cause: str = Field(default="", description="등기원인 (예비란)")
+    correction_cause: str = Field(default="", description="경정원인 (예비란)")
+
+
+class TradeList(BaseModel):
+    """매매목록"""
+    list_number: str = Field(default="", description="목록번호 (예: '2016-553')")
+    trade_amount: Optional[int] = Field(default=None, description="거래가액 (원)")
+    items: List[TradeListItem] = Field(default=[], description="매매 대상 부동산 목록")
+
+
 class RegistryData(BaseModel):
     """등기부등본 파싱 결과"""
     unique_number: str = Field(description="고유번호")
@@ -178,6 +194,7 @@ class RegistryData(BaseModel):
     title_info: TitleInfo = Field(description="표제부 정보")
     section_a: List[SectionAEntry] = Field(default=[], description="갑구 항목 목록 (소유권 관련)")
     section_b: List[SectionBEntry] = Field(default=[], description="을구 항목 목록 (소유권 이외 권리)")
+    trade_lists: List[TradeList] = Field(default=[], description="매매목록 (복수 가능)")
     raw_text: Optional[str] = Field(default=None, description="전체 원본 텍스트")
     parse_date: str = Field(description="파싱 일시")
     parser_version: Optional[str] = Field(default=None, description="파서 버전 (예: '1.0.1')")

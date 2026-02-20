@@ -33,23 +33,12 @@ def parse_date_korean(text: str) -> Optional[str]:
 
 
 def extract_receipt_info(text: str) -> Tuple[str, str]:
-    """접수일자와 접수번호 추출 (셀 텍스트에서)"""
-    date_str = ""
+    """접수일자와 접수번호 추출 (셀 텍스트에서)
+
+    날짜는 parse_date_korean과 동일한 정규화 형식(YYYY년 MM월 DD일)으로 반환.
+    """
+    date_str = parse_date_korean(text) or ""
     number_str = ""
-    # 한국어 형식 우선
-    date_match = re.search(r'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', text)
-    if date_match:
-        date_str = date_match[1]
-    else:
-        # 점 구분 형식 (2025.01.03)
-        date_match = re.search(r'(\d{4}\.\d{1,2}\.\d{1,2})', text)
-        if date_match:
-            date_str = date_match[1]
-        else:
-            # ISO 형식 (2025-01-03)
-            date_match = re.search(r'(\d{4}-\d{1,2}-\d{1,2})', text)
-            if date_match:
-                date_str = date_match[1]
     number_match = re.search(r'제?\s*([\d]+호)', text)
     if number_match:
         number_str = number_match[1]

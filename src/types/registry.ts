@@ -106,18 +106,18 @@ export interface LesseeInfo {
   address?: string; // 주소
 }
 
-export interface SalesList {
-  // 매매목록
-  listNumber: string; // 목록번호
-  transactionAmount: number; // 거래가액
-  properties: SalesProperty[]; // 매매 대상 부동산
+export interface TradeListItem {
+  serial_number: string; // 일련번호
+  property_description: string; // 부동산의 표시
+  rank_number: string; // 순위번호
+  registration_cause: string; // 등기원인
+  correction_cause: string; // 경정원인
 }
 
-export interface SalesProperty {
-  sequence: number; // 일련번호
-  propertyDescription: string; // 부동산의 표시
-  rankNumber: string; // 순위번호
-  registrationCause: string; // 등기원인
+export interface TradeList {
+  list_number: string; // 목록번호
+  trade_amount?: number; // 거래가액 (원)
+  items: TradeListItem[]; // 매매 대상 부동산
 }
 
 export interface RegistrySummary {
@@ -143,7 +143,7 @@ export interface RegistryData {
   titleInfo: RegistryTitleInfo; // 표제부
   sectionA: SectionAEntry[]; // 갑구
   sectionB: SectionBEntry[]; // 을구
-  salesList?: SalesList; // 매매목록 (있는 경우)
+  trade_lists?: TradeList[]; // 매매목록 (복수 가능)
   summary?: RegistrySummary; // 요약 (있는 경우)
   rawText: string; // 원본 텍스트 (참고용)
   parseDate: string; // 파싱 일시

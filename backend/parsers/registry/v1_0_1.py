@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import io
 import copy
+import base64
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -218,13 +219,31 @@ class TitleInfo:
 
 
 @dataclass
+class TradeListItem:
+    """매매목록 항목"""
+    serial_number: str = ""        # 일련번호
+    property_description: str = "" # 부동산의 표시
+    rank_number: str = ""          # 순위번호
+    registration_cause: str = ""   # 등기원인
+    correction_cause: str = ""     # 경정원인
+
+
+@dataclass
+class TradeList:
+    """매매목록"""
+    list_number: str = ""                              # 목록번호 (예: '2016-553')
+    trade_amount: Optional[int] = None                 # 거래가액 (원)
+    items: List[TradeListItem] = field(default_factory=list)
+
+
+@dataclass
 class MajorSummaryOwnerEntry:
     """주요 등기사항 요약 - 등기명의인 요약"""
     name: str                                           # 등기명의인 성명
     resident_number: Optional[str] = None              # 주민/법인등록번호
     final_share: Optional[str] = None                  # 최종 지분
     address: Optional[str] = None                      # 주소
-    rank_numbers: List[str] = field(default_factory=list)  # 관련 순위번호 목록
+    rank_number: str = ""                                  # 순위번호
 
 
 @dataclass
@@ -234,16 +253,22 @@ class MajorSummaryRightEntry:
     registration_purpose: str   # 등기목적
     receipt_date: str = ""      # 접수일자
     receipt_number: str = ""    # 접수번호
-    summary_text: str = ""      # 요약 텍스트
     target_owner: Optional[str] = None     # 대상 소유자
-    # 요약 텍스트에서 추가 파생(선택)
-    max_claim_amount: Optional[int] = None
-    deposit_amount: Optional[int] = None
+    # 요약 텍스트에서 구조화 파싱
+    creditor: Optional[str] = None         # 권리자 (근저당권자, 채권자, 지상권자, 전세권자 등)
+    max_claim_amount: Optional[int] = None # 채권최고액 (원)
+    bond_amount: Optional[int] = None      # 채권액 (원)
+    deposit_amount: Optional[int] = None   # 보증금/전세금 (원)
+    purpose: Optional[str] = None          # 목적 (지상권 등)
+    is_cancelled: bool = False             # 말소 여부 (취소선)
 
 
 @dataclass
 class MajorSummary:
     """주요 등기사항 요약 (참고용)"""
+    property_type: str = ""        # 부동산 유형 ('토지', '건물', '집합건물')
+    address: str = ""              # 소재지 (예: '경상북도 문경시 농암면 내서리 733 전 714㎡')
+    unique_number: str = ""        # 고유번호 (예: '1754-1996-194512')
     owners: List[MajorSummaryOwnerEntry] = field(default_factory=list)
     rights: List[MajorSummaryRightEntry] = field(default_factory=list)
 
@@ -257,7 +282,11 @@ class RegistryData:
     title_info: TitleInfo
     section_a: List[SectionAEntry] = field(default_factory=list)
     section_b: List[SectionBEntry] = field(default_factory=list)
+    trade_lists: List[TradeList] = field(default_factory=list)  # 매매목록
     major_summary: Optional[MajorSummary] = None
+    viewed_at: Optional[str] = None    # 열람일시 (예: '2025년 04월 01일 13시 06분 16초')
+    issued_at: Optional[str] = None    # 발행일시
+    verification_image: Optional[str] = None  # 검증 바코드 (data:image/png;base64,...)
     raw_text: str = ""
     # 파싱 품질/디버깅용 메타
     parse_warnings: List[str] = field(default_factory=list)
@@ -353,10 +382,12 @@ class RegistryPDFParser:
         # 참고용 요약
         'major_summary': re.compile(r'주\s*요\s*등\s*기\s*사\s*항\s*요\s*약'),
 
+        # 부속 목록 (별도 파싱)
+        'trade_list': re.compile(r'매\s*매\s*목\s*록'),
+
         # 파싱 대상 아닌 섹션 → _skip 접두사로 구분
         '_skip_collateral': re.compile(r'공\s*동\s*담\s*보\s*목\s*록'),
         '_skip_sale_list': re.compile(r'매\s*각\s*물\s*건\s*목\s*록'),
-        '_skip_trade_list': re.compile(r'매\s*매\s*목\s*록'),
     }
 
     # 페이지 헤더/푸터 패턴
@@ -491,6 +522,8 @@ class RegistryPDFParser:
             unique_number = self._extract_unique_number()
             property_type = self._detect_property_type()
             property_address = self._extract_address()
+            viewed_at, issued_at = self._extract_timestamps()
+            verification_image = self._extract_verification_image()
 
             # 2-1. 섹션 기반 property_type 보정 (상단 표기가 생략되거나, 첫 페이지 텍스트 추출이 약한 PDF 대비)
             if all_tables_by_section.get('title_land'):
@@ -507,9 +540,27 @@ class RegistryPDFParser:
             section_a = self._parse_section_a_from_tables(
                 all_tables_by_section.get('section_a', [])
             )
-            section_b = self._parse_section_b_from_tables(
-                all_tables_by_section.get('section_b', [])
-            )
+
+            # section_b에 매매목록이 혼입된 경우 분리 (같은 테이블로 감지된 경우 대비)
+            section_b_rows = all_tables_by_section.get('section_b', [])
+            trade_from_b: List[Dict] = []
+            filtered_b_rows: List[Dict] = []
+            in_trade = False
+            for row in section_b_rows:
+                cells = row.get('cells', [])
+                text_compact = ''.join(str(c or '') for c in cells).replace(' ', '')
+                if '매매목록' in text_compact:
+                    in_trade = True
+                if in_trade:
+                    trade_from_b.append(row)
+                else:
+                    filtered_b_rows.append(row)
+
+            section_b = self._parse_section_b_from_tables(filtered_b_rows)
+
+            # 매매목록 파싱 (별도 섹션 + section_b에서 분리된 행 합산)
+            trade_rows = all_tables_by_section.get('trade_list', []) + trade_from_b
+            trade_lists = self._parse_trade_list_from_tables(trade_rows)
 
             owner_rows = all_tables_by_section.get('major_summary_owners', [])
             right_rows = all_tables_by_section.get('major_summary_rights', [])
@@ -565,7 +616,11 @@ class RegistryPDFParser:
                 title_info=title_info,
                 section_a=section_a,
                 section_b=section_b,
+                trade_lists=trade_lists,
                 major_summary=major_summary if (major_summary.owners or major_summary.rights) else None,
+                viewed_at=viewed_at,
+                issued_at=issued_at,
+                verification_image=verification_image,
                 raw_text=self.raw_text,
                 parse_warnings=parse_warnings,
                 parse_stats=parse_stats,
@@ -609,6 +664,101 @@ class RegistryPDFParser:
             addr = WATERMARK_RE.sub('', addr).strip()
             return addr
         return ""
+
+    def _extract_timestamps(self) -> Tuple[Optional[str], Optional[str]]:
+        """열람일시 / 발행일시 추출 (정규화된 형식)"""
+        viewed_at = None
+        issued_at = None
+        m = re.search(r'열람일시\s*[:：]\s*(.+?)(?:\n|$)', self.raw_text)
+        if m:
+            viewed_at = self._normalize_timestamp(clean_text(m[1]))
+        m = re.search(r'(?:발행일시|출력일시)\s*[:：]\s*(.+?)(?:\n|$)', self.raw_text)
+        if m:
+            issued_at = self._normalize_timestamp(clean_text(m[1]))
+        return viewed_at, issued_at
+
+    @staticmethod
+    def _normalize_timestamp(text: str) -> str:
+        """날짜+시간 문자열을 'YYYY년 MM월 DD일 HH시 MM분 SS초' 형식으로 정규화.
+
+        입력 예시:
+        - '2025년04월01일 13시06분16초'
+        - '2025년 4월 1일 오후 1시6분16초'
+        """
+        date_match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', text)
+        time_match = re.search(r'(오전|오후)?\s*(\d{1,2})시\s*(\d{1,2})분\s*(\d{1,2})초', text)
+        if not date_match or not time_match:
+            return text
+
+        year = date_match[1]
+        month = date_match[2].zfill(2)
+        day = date_match[3].zfill(2)
+
+        hour = int(time_match[2])
+        ampm = time_match[1]
+        if ampm == '오후' and hour < 12:
+            hour += 12
+        elif ampm == '오전' and hour == 12:
+            hour = 0
+
+        minute = time_match[3].zfill(2)
+        second = time_match[4].zfill(2)
+        return f"{year}년 {month}월 {day}일 {hour:02d}시 {minute}분 {second}초"
+
+    def _extract_verification_image(self) -> Optional[str]:
+        """첫 페이지 고유번호 하단 바코드 이미지를 data URI(PNG)로 추출.
+
+        PyMuPDF(fitz)로 첫 페이지의 이미지 객체를 직접 추출한다.
+        pdfplumber의 page.images는 벡터/특수 임베딩 이미지를 놓칠 수 있으므로
+        fitz.Page.get_images()를 사용한다.
+        """
+        try:
+            import fitz
+        except ImportError:
+            return None
+
+        try:
+            doc = fitz.open(stream=self.pdf_buffer, filetype="pdf")
+            page = doc[0]
+
+            # 페이지 내 모든 이미지 참조
+            image_list = page.get_images(full=True)
+            if not image_list:
+                doc.close()
+                return None
+
+            # 고유번호 하단 바코드: 일반적으로 첫 페이지 우측 상단의 가장 큰 이미지
+            best_img = None
+            best_area = 0
+            for img_info in image_list:
+                xref = img_info[0]
+                # 이미지 위치 확인 (페이지 내 bbox)
+                rects = page.get_image_rects(xref)
+                for rect in rects:
+                    # 우측 영역 (페이지 폭의 50% 이후) + 상단 영역 (30% 이내)
+                    if rect.x0 > page.rect.width * 0.5 and rect.y0 < page.rect.height * 0.3:
+                        area = rect.width * rect.height
+                        if area > best_area:
+                            best_area = area
+                            best_img = xref
+
+            if best_img is None:
+                doc.close()
+                return None
+
+            # 이미지 데이터 추출 → PNG
+            pix = fitz.Pixmap(doc, best_img)
+            if pix.n > 4:  # CMYK → RGB
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            png_data = pix.tobytes("png")
+            doc.close()
+
+            b64 = base64.b64encode(png_data).decode()
+            return f"data:image/png;base64,{b64}"
+
+        except Exception as e:
+            logger.warning("바코드 이미지 추출 실패: {}", e)
+            return None
 
     # ==================== 섹션 감지 ====================
 
@@ -1074,6 +1224,69 @@ class RegistryPDFParser:
 
         return entries
 
+    def _parse_trade_list_from_tables(self, rows: List[Dict]) -> List[TradeList]:
+        """매매목록 테이블 파싱"""
+        if not rows:
+            return []
+
+        trade = TradeList()
+        for row_data in rows:
+            cells = row_data.get('cells', [])
+            if not cells:
+                continue
+
+            line = ' '.join(str(c or '') for c in cells)
+            line_clean = clean_text(line)
+            compact = line_clean.replace(' ', '')
+
+            # 섹션 헤더 (【 매 매 목 록 】) 건너뛰기
+            if '【' in line or '】' in line:
+                continue
+
+            # 메타 정보: 목록번호
+            if '목록번호' in compact:
+                m = re.search(r'(\d[\d-]+)', compact.replace('목록번호', '', 1))
+                if m:
+                    trade.list_number = m[1]
+                continue
+
+            # 메타 정보: 거래가액
+            if '거래가액' in compact:
+                trade.trade_amount = parse_amount(line_clean)
+                continue
+
+            # 컬럼 헤더 건너뛰기
+            if '일련번호' in compact or '부동산' in compact:
+                continue
+
+            # 빈 행 건너뛰기
+            if not line_clean.strip():
+                continue
+
+            # 이하여백 건너뛰기
+            if '이하여백' in compact:
+                continue
+
+            # 데이터 행: 일련번호(숫자)로 시작
+            first = clean_text(str(cells[0] or ''))
+            if first and re.match(r'\d+$', first):
+                item = TradeListItem(serial_number=first)
+                if len(cells) > 1:
+                    item.property_description = clean_text(str(cells[1] or ''))
+                if len(cells) > 2:
+                    item.rank_number = clean_text(str(cells[2] or ''))
+                if len(cells) > 3:
+                    # 예비란: 등기원인 / 경정원인 (같은 셀 또는 별도 셀)
+                    cause_text = clean_text(str(cells[3] or ''))
+                    item.registration_cause = cause_text
+                if len(cells) > 4:
+                    item.correction_cause = clean_text(str(cells[4] or ''))
+                trade.items.append(item)
+
+        if trade.list_number or trade.items:
+            return [trade]
+        return []
+
     # ==================== 등기유형 분류 ====================
 
     def _classify_reg_type_a(self, text: str) -> str:
@@ -1520,7 +1733,23 @@ class RegistryPDFParser:
         """'주요 등기사항 요약 (참고용)' 섹션 파싱."""
         owners = self._parse_major_summary_owners(owner_rows)
         rights = self._parse_major_summary_rights(right_rows)
-        return MajorSummary(owners=owners, rights=rights)
+        summary = MajorSummary(owners=owners, rights=rights)
+
+        # 요약 페이지 상단 헤더에서 기본 정보 추출
+        summary_start = self.raw_text.find('주요')
+        if summary_start >= 0:
+            header = self.raw_text[summary_start:summary_start + 500]
+            # 고유번호
+            un_match = re.search(r'고유번호\s*[:：]?\s*([\d\s-]+)', header)
+            if un_match:
+                summary.unique_number = re.sub(r'\s+', '', un_match[1]).strip()
+            # [토지/건물/집합건물] 소재지
+            pt_match = re.search(r'\[(토지|건물|집합건물)\]\s*(.+?)(?:\n|$)', header)
+            if pt_match:
+                summary.property_type = pt_match[1]
+                summary.address = clean_text(pt_match[2])
+
+        return summary
 
     def _parse_major_summary_owners(self, tables: List[Dict[str, Any]]) -> List[MajorSummaryOwnerEntry]:
         """주요 등기사항 요약 - 등기명의인 테이블 파싱"""
@@ -1539,19 +1768,12 @@ class RegistryPDFParser:
             addr = clean_text(cells[3])
             ranks_raw = clean_text(cells[4])
 
-            rank_numbers = []
-            if ranks_raw:
-                for token in re.split(r"[\s,]+", ranks_raw):
-                    token = token.strip()
-                    if token:
-                        rank_numbers.append(token)
-
             owners.append(MajorSummaryOwnerEntry(
                 name=name,
                 resident_number=resident or None,
                 final_share=share or None,
                 address=addr or None,
-                rank_numbers=rank_numbers,
+                rank_number=ranks_raw,
             ))
 
         return owners
@@ -1582,23 +1804,47 @@ class RegistryPDFParser:
                 registration_purpose=purpose,
                 receipt_date=receipt_date,
                 receipt_number=receipt_number,
-                summary_text=summary_text,
                 target_owner=target_owner or None,
+                is_cancelled=row.get('is_cancelled', False),
             )
 
-            # 추가 파생: 요약 텍스트에서 금액 탐지
-            if "채권최고액" in summary_text:
-                m = re.search(r"채권최고액\s*(금\s*[\d,]+\s*원)", summary_text)
-                if m:
-                    entry.max_claim_amount = parse_amount(m.group(1))
-            if "보증금" in summary_text:
-                m = re.search(r"보증금\s*(금\s*[\d,]+\s*원)", summary_text)
-                if m:
-                    entry.deposit_amount = parse_amount(m.group(1))
+            # 요약 텍스트에서 구조화 파싱
+            self._parse_summary_right_detail(entry, summary_text)
 
             rights.append(entry)
 
         return rights
+
+    @staticmethod
+    def _parse_summary_right_detail(entry: MajorSummaryRightEntry, text: str):
+        """요약 텍스트에서 구조화된 필드를 추출한다."""
+        # 채권최고액
+        m = re.search(r'채권최고액\s*(금\s*[\d,]+\s*원)', text)
+        if m:
+            entry.max_claim_amount = parse_amount(m[1])
+
+        # 채권액
+        m = re.search(r'채권액\s*(금\s*[\d,]+\s*원)', text)
+        if m:
+            entry.bond_amount = parse_amount(m[1])
+
+        # 보증금/전세금
+        m = re.search(r'(?:보증금|전세금)\s*(금\s*[\d,]+\s*원)', text)
+        if m:
+            entry.deposit_amount = parse_amount(m[1])
+
+        # 목적 (지상권 등) — "목 적" 뒤 ~ 권리자 키워드 전까지
+        m = re.search(r'목\s*적\s+(.+?)(?:지상권자|전세권자|임차권자|채권자|근저당권자|$)', text)
+        if m:
+            entry.purpose = clean_text(m[1])
+
+        # 권리자 (근저당권자, 채권자, 지상권자, 전세권자 등)
+        m = re.search(
+            r'(?:근저당권자|저당권자|채권자|지상권자|전세권자|임차권자|권리자)\s+(\S+)',
+            text
+        )
+        if m:
+            entry.creditor = m[1]
 
 
 # ==================== 외부 인터페이스 ====================
