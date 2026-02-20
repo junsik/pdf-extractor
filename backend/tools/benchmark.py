@@ -1,23 +1,21 @@
 """
-등기부등본 PDF 파서 벤치마크
+PDF 파서 벤치마크
 
 파서 버전별 정확도를 LLM 벤치마크처럼 수치화하여 측정한다.
 PDF에서 추출 가능한 모든 텍스트 대비 파서가 구조화한 비율 = 점수.
 
-인터페이스 계약 (pdf_parser.py가 반드시 제공해야 하는 것):
-  - parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]
-  - PARSER_VERSION: str
-
 Usage:
-  python benchmark.py                        # upload/ 폴더 전체
-  python benchmark.py path/to/specific.pdf   # 특정 파일
-  python benchmark.py --verbose              # 누락 토큰 상세 출력
-  python benchmark.py --json                 # JSON 형식 출력
+  python tools/benchmark.py                                # upload/ 폴더 전체
+  python tools/benchmark.py path/to/specific.pdf           # 특정 파일
+  python tools/benchmark.py --verbose                      # 누락 토큰 상세 출력
+  python tools/benchmark.py --json                         # JSON 형식 출력
+  python tools/benchmark.py --type registry --parser v1.0.0 # 특정 파서
+  python tools/benchmark.py --list                         # 파서 목록
+  python tools/benchmark.py --all-parsers                  # 전 버전 비교
 """
 import os
 import sys
 import re
-import io
 import json
 import glob
 import argparse
@@ -27,29 +25,27 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 
-# 스크립트 위치로 이동 (admin.py 패턴)
-os.chdir(Path(__file__).parent)
-sys.path.insert(0, str(Path(__file__).parent))
+# 백엔드 루트를 sys.path에 추가 (tools/ 에서 실행)
+_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent)
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
+os.chdir(_BACKEND_ROOT)
 
 import pdfplumber
 
-# ==================== 인터페이스 계약 ====================
-# 모든 파서 모듈은 아래 2개를 export해야 한다:
-#   - PARSER_VERSION: str
-#   - parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]
-#
-# parsers/ 패키지를 통해 버전별 파서를 로드한다.
-from parsers import load_parser, list_parsers
+from parsers import get_parser, list_document_types, list_versions
+from parsers.base import BaseParser
+from parsers.common.pdf_utils import is_watermark_char, WATERMARK_RE
 
 
 # ==================== 설정 ====================
 
-DEFAULT_UPLOAD_DIR = "../upload"
-BENCHMARK_JSON = "../benchmark-history.json"
-BENCHMARK_MD = "../BENCHMARK.md"
-MAX_HISTORY = 5  # 리포트에 표시할 최근 버전 수
+DEFAULT_UPLOAD_DIR = "upload"
+BENCHMARK_JSON = "benchmark-history.json"
+BENCHMARK_MD = "BENCHMARK.md"
+MAX_HISTORY = 5
 
-# ground truth에서 제외할 구조 노이즈 토큰 (컬럼 헤더, 섹션 제목)
+# ground truth에서 제외할 구조 노이즈 토큰
 NOISE_TOKENS = {
     "표시번호", "접수", "소재지번", "건물내역", "등기원인", "기타사항",
     "순위번호", "등기목적", "권리자", "표제부", "갑구", "을구",
@@ -66,10 +62,7 @@ EXCLUDED_KEYS = {
     "is_cancelled", "property_type",
 }
 
-# 워터마크 패턴
-_WATERMARK_RE = re.compile(r"열\s*람\s*용")
-
-# 헤더/푸터 패턴 (pdf_parser.py와 동일)
+# 헤더/푸터 패턴
 _HEADER_RE = re.compile(
     r"^\[(?:토지|건물|집합건물)\]\s*.+$|"
     r"^표시번호\s+접\s*수|"
@@ -79,7 +72,7 @@ _FOOTER_RE = re.compile(
     r"열람일시\s*:|발행일시\s*:|^\d+/\d+$"
 )
 
-# 섹션 경계 감지 패턴 (pdf_parser.py와 동일)
+# 섹션 경계 감지 패턴
 _SECTION_PATTERNS = {
     "title_land": re.compile(r"표\s*제\s*부.*토지의\s*표시"),
     "title_building": re.compile(r"표\s*제\s*부.*건물의\s*표시"),
@@ -120,6 +113,7 @@ class PDFScore:
 
 @dataclass
 class BenchmarkReport:
+    document_type: str = ""
     parser_version: str = ""
     date: str = ""
     file_count: int = 0
@@ -132,23 +126,11 @@ class BenchmarkReport:
 
 # ==================== Ground Truth 추출 ====================
 
-def _is_watermark_char(obj: dict) -> bool:
-    """워터마크 문자 판별 (회색 색상 기반)"""
-    if obj.get("object_type") != "char":
-        return False
-    color = obj.get("non_stroking_color")
-    if isinstance(color, (tuple, list)) and len(color) >= 3:
-        return all(0.5 < c < 1.0 for c in color[:3])
-    return False
-
-
 def _clean_line(line: str) -> str:
-    """라인 정리: 워터마크 텍스트 제거"""
-    return _WATERMARK_RE.sub("", line).strip()
+    return WATERMARK_RE.sub("", line).strip()
 
 
 def _detect_section(line: str) -> Optional[str]:
-    """라인에서 섹션 경계 감지"""
     clean = re.sub(r"\s+", " ", line).strip()
     for key, pattern in _SECTION_PATTERNS.items():
         if pattern.search(clean):
@@ -161,22 +143,19 @@ def _detect_section(line: str) -> Optional[str]:
 
 
 def extract_ground_truth(pdf_path: str) -> GroundTruth:
-    """PDF에서 ground truth 텍스트 추출 (워터마크/헤더/푸터/스킵 섹션 제외)"""
+    """PDF에서 ground truth 텍스트 추출"""
     sections = {"title": [], "section_a": [], "section_b": []}
     current = "title"
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            # 워터마크 제거
-            clean_page = page.filter(lambda obj: not _is_watermark_char(obj))
+            clean_page = page.filter(lambda obj: not is_watermark_char(obj))
             text = clean_page.extract_text() or ""
 
             for line in text.split("\n"):
                 stripped = line.strip()
                 if not stripped:
                     continue
-
-                # 헤더/푸터 제거
                 if _HEADER_RE.match(stripped) or _FOOTER_RE.search(stripped):
                     continue
 
@@ -184,7 +163,6 @@ def extract_ground_truth(pdf_path: str) -> GroundTruth:
                 if not cleaned:
                     continue
 
-                # 섹션 경계 감지
                 detected = _detect_section(cleaned)
                 if detected:
                     if detected == "skip":
@@ -196,9 +174,7 @@ def extract_ground_truth(pdf_path: str) -> GroundTruth:
                     sections[current].append(cleaned)
 
     return GroundTruth(
-        full_text="\n".join(
-            sections["title"] + sections["section_a"] + sections["section_b"]
-        ),
+        full_text="\n".join(sections["title"] + sections["section_a"] + sections["section_b"]),
         title_text="\n".join(sections["title"]),
         section_a_text="\n".join(sections["section_a"]),
         section_b_text="\n".join(sections["section_b"]),
@@ -208,7 +184,6 @@ def extract_ground_truth(pdf_path: str) -> GroundTruth:
 # ==================== 파서 출력 텍스트 수집 ====================
 
 def _numeric_tokens(value) -> List[str]:
-    """숫자를 매칭 가능한 토큰으로 변환"""
     if isinstance(value, bool) or value is None or value == 0:
         return []
     if isinstance(value, float):
@@ -226,7 +201,6 @@ def _numeric_tokens(value) -> List[str]:
 
 
 def _collect_strings(obj: Any, excluded: set) -> List[str]:
-    """딕셔너리/리스트에서 모든 문자열 값을 재귀 수집"""
     strings = []
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -245,16 +219,11 @@ def _collect_strings(obj: Any, excluded: set) -> List[str]:
 
 
 def collect_parser_text(result: Dict[str, Any]) -> Dict[str, str]:
-    """파서 결과에서 섹션별 텍스트 수집 (raw_text 제외)"""
+    """파서 결과에서 섹션별 텍스트 수집"""
     title_text = " ".join(_collect_strings(result.get("title_info", {}), EXCLUDED_KEYS))
+    section_a_text = " ".join(_collect_strings(result.get("section_a", []), EXCLUDED_KEYS))
+    section_b_text = " ".join(_collect_strings(result.get("section_b", []), EXCLUDED_KEYS))
 
-    section_a_entries = result.get("section_a", [])
-    section_a_text = " ".join(_collect_strings(section_a_entries, EXCLUDED_KEYS))
-
-    section_b_entries = result.get("section_b", [])
-    section_b_text = " ".join(_collect_strings(section_b_entries, EXCLUDED_KEYS))
-
-    # 최상위 필드 (unique_number, property_address)
     top_fields = []
     for k in ("unique_number", "property_address"):
         v = result.get(k)
@@ -262,7 +231,6 @@ def collect_parser_text(result: Dict[str, Any]) -> Dict[str, str]:
             top_fields.append(v)
 
     full = " ".join(top_fields) + " " + title_text + " " + section_a_text + " " + section_b_text
-
     return {
         "full": full,
         "title": " ".join(top_fields) + " " + title_text,
@@ -274,17 +242,13 @@ def collect_parser_text(result: Dict[str, Any]) -> Dict[str, str]:
 # ==================== 토큰화 + 스코어 ====================
 
 def tokenize(text: str) -> Counter:
-    """텍스트를 토큰 Counter로 변환"""
     if not text:
         return Counter()
     tokens = re.findall(r"[\w가-힣]+", text)
-    # 2글자 미만 필터링 + 노이즈 토큰 제거
-    filtered = [t for t in tokens if len(t) >= 2 and t not in NOISE_TOKENS]
-    return Counter(filtered)
+    return Counter(t for t in tokens if len(t) >= 2 and t not in NOISE_TOKENS)
 
 
 def compute_recall(gt: Counter, parser: Counter) -> Optional[float]:
-    """토큰 리콜 계산. gt가 비어있으면 None 반환."""
     total = sum(gt.values())
     if total == 0:
         return None
@@ -293,7 +257,6 @@ def compute_recall(gt: Counter, parser: Counter) -> Optional[float]:
 
 
 def find_missing(gt: Counter, parser: Counter, top_n: int = 20) -> List[str]:
-    """gt에는 있지만 parser에 없거나 부족한 토큰 (빈도 내림차순)"""
     missing = Counter()
     for token, count in gt.items():
         diff = count - parser.get(token, 0)
@@ -302,32 +265,28 @@ def find_missing(gt: Counter, parser: Counter, top_n: int = 20) -> List[str]:
     return [t for t, _ in missing.most_common(top_n)]
 
 
-# ==================== 단일 PDF 벤치마크 ====================
+# ==================== 벤치마크 실행 ====================
 
-def benchmark_single(pdf_path: str, parser=None) -> PDFScore:
-    """단일 PDF에 대해 벤치마크 실행"""
-    if parser is None:
-        parser = load_parser("latest")
-
+def benchmark_single(pdf_path: str, parser: BaseParser) -> PDFScore:
+    """단일 PDF 벤치마크"""
     filename = os.path.basename(pdf_path)
     score = PDFScore(filename=filename)
 
     try:
-        # 1. Ground truth 추출
         gt = extract_ground_truth(pdf_path)
 
-        # 2. 파서 실행
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
-        result = parser.parse_registry_pdf(pdf_bytes)
 
-        score.property_type = result.get("property_type", "unknown")
-        score.errors = result.get("errors", [])
+        # 새 파서 인터페이스: parser.parse() → ParseResult
+        parse_result = parser.parse(pdf_bytes)
+        result = parse_result.data
 
-        # 3. 파서 출력 텍스트 수집
+        score.property_type = result.get("property_type", parse_result.document_sub_type or "unknown")
+        score.errors = result.get("errors", []) + parse_result.errors
+
         parser_text = collect_parser_text(result)
 
-        # 4. 토큰화
         gt_full = tokenize(gt.full_text)
         gt_title = tokenize(gt.title_text)
         gt_a = tokenize(gt.section_a_text)
@@ -338,15 +297,12 @@ def benchmark_single(pdf_path: str, parser=None) -> PDFScore:
         p_a = tokenize(parser_text["section_a"])
         p_b = tokenize(parser_text["section_b"])
 
-        # 5. 스코어
         score.overall = compute_recall(gt_full, p_full) or 0.0
         score.title = compute_recall(gt_title, p_title)
         score.section_a = compute_recall(gt_a, p_a)
         score.section_b = compute_recall(gt_b, p_b)
         score.gt_tokens = sum(gt_full.values())
-        score.parser_tokens = sum(
-            min(gt_full[t], p_full.get(t, 0)) for t in gt_full
-        )
+        score.parser_tokens = sum(min(gt_full[t], p_full.get(t, 0)) for t in gt_full)
         score.missing_top20 = find_missing(gt_full, p_full)
 
     except Exception as e:
@@ -355,24 +311,20 @@ def benchmark_single(pdf_path: str, parser=None) -> PDFScore:
     return score
 
 
-# ==================== 전체 벤치마크 ====================
-
-def run_benchmark(pdf_paths: List[str], parser=None) -> BenchmarkReport:
-    """전체 PDF에 대해 벤치마크 실행"""
-    if parser is None:
-        parser = load_parser("latest")
-
+def run_benchmark(pdf_paths: List[str], parser: BaseParser,
+                  document_type: str = "registry") -> BenchmarkReport:
+    """전체 벤치마크 실행"""
     report = BenchmarkReport(
-        parser_version=parser.PARSER_VERSION,
+        document_type=document_type,
+        parser_version=parser.parser_version(),
         date=datetime.now().strftime("%Y-%m-%d %H:%M"),
         file_count=len(pdf_paths),
     )
 
     for path in sorted(pdf_paths):
-        score = benchmark_single(path, parser=parser)
+        score = benchmark_single(path, parser)
         report.scores.append(score)
 
-    # 평균 계산
     if report.scores:
         valid = [s for s in report.scores if s.gt_tokens > 0]
         if valid:
@@ -400,10 +352,9 @@ def _score_str(val: Optional[float]) -> str:
 
 
 def print_report(report: BenchmarkReport, verbose: bool = False):
-    """LLM 벤치마크 스타일 리포트 출력"""
     w = 60
     print(f"\n{'=' * w}")
-    print(f"  PDF Parser Benchmark v{report.parser_version}")
+    print(f"  PDF Parser Benchmark — {report.document_type} v{report.parser_version}")
     print(f"  {report.date} | Files: {report.file_count}")
     print(f"{'=' * w}")
 
@@ -413,15 +364,12 @@ def print_report(report: BenchmarkReport, verbose: bool = False):
         print(f"      Type: {s.property_type} | "
               f"Tokens: {s.parser_tokens}/{s.gt_tokens} | "
               f"Score: {s.overall:.1f}/100")
-        print(f"      "
-              f"표제부: {_score_str(s.title)} | "
+        print(f"      표제부: {_score_str(s.title)} | "
               f"갑구: {_score_str(s.section_a)} | "
               f"을구: {_score_str(s.section_b)}")
 
         if verbose and s.missing_top20:
-            missing_str = ", ".join(s.missing_top20[:10])
-            print(f"      Missing: {missing_str}")
-
+            print(f"      Missing: {', '.join(s.missing_top20[:10])}")
         if s.errors:
             for err in s.errors:
                 print(f"      Error: {err}")
@@ -435,18 +383,17 @@ def print_report(report: BenchmarkReport, verbose: bool = False):
 
 
 def print_json(report: BenchmarkReport):
-    """JSON 형식 출력"""
-    data = asdict(report)
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
 
 
 # ==================== JSON 히스토리 ====================
 
 def save_to_json(report: BenchmarkReport, path: str = BENCHMARK_JSON):
-    """벤치마크 결과를 JSON 히스토리에 추가"""
     history = load_history(path)
+    key = f"{report.document_type}:{report.parser_version}"
 
     entry = {
+        "document_type": report.document_type,
         "version": report.parser_version,
         "date": report.date,
         "files": report.file_count,
@@ -455,205 +402,138 @@ def save_to_json(report: BenchmarkReport, path: str = BENCHMARK_JSON):
         "section_a": report.section_a_avg,
         "section_b": report.section_b_avg,
         "details": [
-            {
-                "file": s.filename,
-                "type": s.property_type,
-                "score": s.overall,
-                "title": s.title,
-                "section_a": s.section_a,
-                "section_b": s.section_b,
-                "gt_tokens": s.gt_tokens,
-                "parser_tokens": s.parser_tokens,
-            }
+            {"file": s.filename, "type": s.property_type, "score": s.overall,
+             "title": s.title, "section_a": s.section_a, "section_b": s.section_b,
+             "gt_tokens": s.gt_tokens, "parser_tokens": s.parser_tokens}
             for s in report.scores
         ],
     }
 
-    # 같은 버전이 이미 있으면 교체
-    history = [h for h in history if h["version"] != entry["version"]]
+    history = [h for h in history
+               if f"{h.get('document_type', 'registry')}:{h['version']}" != key]
     history.append(entry)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
-
-    print(f"  Saved to {path} (v{report.parser_version})")
+    print(f"  Saved to {path} ({report.document_type} v{report.parser_version})")
 
 
 def load_history(path: str = BENCHMARK_JSON) -> List[Dict]:
-    """JSON 히스토리 로드"""
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-# ==================== Markdown 리포트 생성 ====================
+# ==================== Markdown 리포트 ====================
 
-def generate_report_md(path: str = BENCHMARK_JSON, out: str = BENCHMARK_MD):
-    """JSON 히스토리에서 최근 5개 버전 비교 Markdown 리포트 생성"""
-    history = load_history(path)
+def generate_report_md(doc_type: str = "registry",
+                       path: str = BENCHMARK_JSON, out: str = BENCHMARK_MD):
+    history = [h for h in load_history(path)
+               if h.get("document_type", "registry") == doc_type]
     if not history:
         print("히스토리 없음. 먼저 --save로 벤치마크를 실행하세요.", file=sys.stderr)
-        sys.exit(1)
+        return
 
     recent = history[-MAX_HISTORY:]
     latest = recent[-1]
+    doc_info = next((t for t in list_document_types() if t.type_id == doc_type), None)
+    doc_name = doc_info.display_name if doc_info else doc_type
 
-    lines = []
-    lines.append("# PDF Parser Benchmark Report")
-    lines.append("")
-    lines.append(f"> Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append("")
+    lines = [
+        f"# PDF Parser Benchmark Report — {doc_name}",
+        "",
+        f"> Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "## Latest",
+        "",
+        f"- **Document Type**: {doc_name} (`{doc_type}`)",
+        f"- **Version**: v{latest['version']}",
+        f"- **Date**: {latest['date']}",
+        f"- **Overall**: **{latest['overall']}**/100",
+        f"- 표제부: {_score_str(latest.get('title'))} | "
+        f"갑구: {_score_str(latest.get('section_a'))} | "
+        f"을구: {_score_str(latest.get('section_b'))}",
+        "",
+    ]
 
-    # ── 최신 요약 ──
-    lines.append("## Latest")
-    lines.append("")
-    lines.append(f"- **Version**: v{latest['version']}")
-    lines.append(f"- **Date**: {latest['date']}")
-    lines.append(f"- **Overall**: **{latest['overall']}**/100")
-    lines.append(f"- 표제부: {_score_str(latest.get('title'))} | "
-                 f"갑구: {_score_str(latest.get('section_a'))} | "
-                 f"을구: {_score_str(latest.get('section_b'))}")
-    lines.append("")
-
-    # ── Mermaid 바 차트: 버전별 Overall ──
     if len(recent) >= 2:
-        lines.append("## Version History")
-        lines.append("")
-        lines.append("```mermaid")
-        lines.append("xychart-beta")
-        lines.append('  title "Overall Score by Version"')
-        lines.append("  x-axis [{}]".format(
-            ", ".join(f'"v{h["version"]}"' for h in recent)
-        ))
-        lines.append('  y-axis "Score" 0 --> 100')
-        lines.append("  bar [{}]".format(
-            ", ".join(str(h["overall"]) for h in recent)
-        ))
-        lines.append("```")
-        lines.append("")
+        lines += [
+            "## Version History", "",
+            "```mermaid", "xychart-beta",
+            '  title "Overall Score by Version"',
+            "  x-axis [{}]".format(", ".join(f'"v{h["version"]}"' for h in recent)),
+            '  y-axis "Score" 0 --> 100',
+            "  bar [{}]".format(", ".join(str(h["overall"]) for h in recent)),
+            "```", "",
+        ]
 
-    # ── Mermaid 라인 차트: 섹션별 추이 ──
-    if len(recent) >= 2:
-        lines.append("### Section Breakdown")
-        lines.append("")
-        lines.append("```mermaid")
-        lines.append("xychart-beta")
-        lines.append('  title "Score by Section"')
-        lines.append("  x-axis [{}]".format(
-            ", ".join(f'"v{h["version"]}"' for h in recent)
-        ))
-        lines.append('  y-axis "Score" 0 --> 100')
-        lines.append('  line "표제부" [{}]'.format(
-            ", ".join(str(h.get("title") or 0) for h in recent)
-        ))
-        lines.append('  line "갑구" [{}]'.format(
-            ", ".join(str(h.get("section_a") or 0) for h in recent)
-        ))
-        lines.append('  line "을구" [{}]'.format(
-            ", ".join(str(h.get("section_b") or 0) for h in recent)
-        ))
-        lines.append("```")
-        lines.append("")
-
-    # ── 히스토리 테이블 ──
-    lines.append("## Score Table")
-    lines.append("")
-    lines.append("| Version | Date | Overall | 표제부 | 갑구 | 을구 | Files |")
-    lines.append("|---------|------|---------|--------|------|------|-------|")
+    lines += [
+        "## Score Table", "",
+        "| Version | Date | Overall | 표제부 | 갑구 | 을구 | Files |",
+        "|---------|------|---------|--------|------|------|-------|",
+    ]
     for h in reversed(recent):
         lines.append(
             f"| v{h['version']} | {h['date']} | "
-            f"**{h['overall']}** | "
-            f"{_score_str(h.get('title'))} | "
-            f"{_score_str(h.get('section_a'))} | "
-            f"{_score_str(h.get('section_b'))} | "
+            f"**{h['overall']}** | {_score_str(h.get('title'))} | "
+            f"{_score_str(h.get('section_a'))} | {_score_str(h.get('section_b'))} | "
             f"{h['files']} |"
         )
     lines.append("")
 
-    # ── 최신 버전 파일별 상세 ──
-    lines.append("## File Details (Latest)")
-    lines.append("")
-    lines.append("| File | Type | Score | 표제부 | 갑구 | 을구 | Tokens |")
-    lines.append("|------|------|-------|--------|------|------|--------|")
+    lines += [
+        "## File Details (Latest)", "",
+        "| File | Type | Score | 표제부 | 갑구 | 을구 | Tokens |",
+        "|------|------|-------|--------|------|------|--------|",
+    ]
     for d in latest.get("details", []):
         lines.append(
-            f"| {d['file']} | {d['type']} | "
-            f"**{d['score']}** | "
-            f"{_score_str(d.get('title'))} | "
-            f"{_score_str(d.get('section_a'))} | "
+            f"| {d['file']} | {d['type']} | **{d['score']}** | "
+            f"{_score_str(d.get('title'))} | {_score_str(d.get('section_a'))} | "
             f"{_score_str(d.get('section_b'))} | "
             f"{d.get('parser_tokens', 0)}/{d.get('gt_tokens', 0)} |"
         )
     lines.append("")
 
-    content = "\n".join(lines)
     with open(out, "w", encoding="utf-8") as f:
-        f.write(content)
-
+        f.write("\n".join(lines))
     print(f"  Report: {out}")
 
 
 # ==================== CLI ====================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="등기부등본 PDF 파서 벤치마크"
-    )
-    parser.add_argument(
-        "pdf_path", nargs="?",
-        help="특정 PDF 파일 경로 (미지정 시 upload/ 전체)"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="누락 토큰 상세 출력"
-    )
-    parser.add_argument(
-        "--json", action="store_true",
-        help="JSON 형식 출력"
-    )
-    parser.add_argument(
-        "--save", "-s", action="store_true",
-        help="결과를 JSON 히스토리에 저장"
-    )
-    parser.add_argument(
-        "--report", "-r", action="store_true",
-        help="JSON 히스토리에서 Markdown 리포트 생성 (벤치마크 실행 안 함)"
-    )
-    parser.add_argument(
-        "--parser", "-p", default="latest",
-        help="파서 버전 (기본: latest, 예: v2.1.0)"
-    )
-    parser.add_argument(
-        "--all-parsers", action="store_true",
-        help="모든 파서 버전을 순차 실행하여 비교"
-    )
-    parser.add_argument(
-        "--list", action="store_true",
-        help="사용 가능한 파서 버전 목록 출력"
-    )
-    parser.add_argument(
-        "--upload-dir", default=DEFAULT_UPLOAD_DIR,
-        help=f"PDF 디렉토리 (기본: {DEFAULT_UPLOAD_DIR})"
-    )
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="PDF 파서 벤치마크")
+    ap.add_argument("pdf_path", nargs="?", help="특정 PDF 파일 경로")
+    ap.add_argument("--verbose", "-v", action="store_true", help="누락 토큰 상세")
+    ap.add_argument("--json", action="store_true", help="JSON 출력")
+    ap.add_argument("--save", "-s", action="store_true", help="히스토리 저장")
+    ap.add_argument("--report", "-r", action="store_true", help="Markdown 리포트 생성")
+    ap.add_argument("--type", "-t", default="registry", help="문서 타입 (기본: registry)")
+    ap.add_argument("--parser", "-p", default="latest", help="파서 버전 (기본: latest)")
+    ap.add_argument("--all-parsers", action="store_true", help="전 버전 순차 비교")
+    ap.add_argument("--list", action="store_true", help="파서 목록")
+    ap.add_argument("--upload-dir", default=DEFAULT_UPLOAD_DIR, help="PDF 디렉토리")
+    args = ap.parse_args()
 
-    # --list: 파서 목록 출력
+    # --list
     if args.list:
-        print("사용 가능한 파서:")
-        for v in list_parsers():
-            p = load_parser(v)
-            tag = " (current)" if v == "latest" else ""
-            print(f"  {v} → v{p.PARSER_VERSION}{tag}")
+        print("등록된 문서 타입:")
+        for dt in list_document_types():
+            versions = list_versions(dt.type_id)
+            ver_str = ", ".join(f"v{v}" for v in versions)
+            print(f"  {dt.type_id} ({dt.display_name}): {ver_str}")
+            if dt.sub_types:
+                print(f"    sub-types: {', '.join(dt.sub_types)}")
         return
 
-    # --report: 리포트만 생성하고 종료
+    # --report
     if args.report:
-        generate_report_md()
+        generate_report_md(doc_type=args.type)
         return
 
-    # PDF 경로 수집
+    # PDF 수집
     if args.pdf_path:
         if not os.path.exists(args.pdf_path):
             print(f"파일 없음: {args.pdf_path}", file=sys.stderr)
@@ -665,33 +545,30 @@ def main():
             print(f"PDF 파일 없음: {args.upload_dir}", file=sys.stderr)
             sys.exit(1)
 
-    # --all-parsers: 모든 버전 순차 실행
+    # --all-parsers
     if args.all_parsers:
-        versions = list_parsers()
-        for ver in versions:
-            p = load_parser(ver)
-            report = run_benchmark(pdf_paths, parser=p)
+        for ver in list_versions(args.type):
+            p = get_parser(args.type, ver)
+            report = run_benchmark(pdf_paths, parser=p, document_type=args.type)
             print_report(report, verbose=args.verbose)
             if args.save:
                 save_to_json(report)
         if args.save:
-            generate_report_md()
+            generate_report_md(doc_type=args.type)
         return
 
-    # 단일 파서 실행
-    p = load_parser(args.parser)
-    report = run_benchmark(pdf_paths, parser=p)
+    # 단일 실행
+    p = get_parser(args.type, args.parser)
+    report = run_benchmark(pdf_paths, parser=p, document_type=args.type)
 
-    # 출력
     if args.json:
         print_json(report)
     else:
         print_report(report, verbose=args.verbose)
 
-    # 저장
     if args.save:
         save_to_json(report)
-        generate_report_md()
+        generate_report_md(doc_type=args.type)
 
 
 if __name__ == "__main__":
