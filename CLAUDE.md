@@ -50,7 +50,9 @@
 │   │   ├── dependencies.py     # FastAPI Depends (인증, DI)
 │   │   ├── routers/            # auth, parse, payment, user, products, health
 │   │   └── schemas/            # API 요청/응답 DTO
-│   └── admin.py                # 관리자 CLI 도구
+│   └── tools/                  # 독립 실행 도구
+│       ├── admin.py            # 관리자 CLI
+│       └── benchmark.py        # 파서 벤치마크
 ├── Dockerfile.allinone         # All-in-one 이미지 빌드
 ├── Caddyfile.allinone          # Caddy 리버스 프록시 설정
 ├── supervisord.allinone.conf   # 프로세스 매니저 설정
@@ -76,12 +78,12 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ### 관리자 CLI
 ```bash
 # 로컬
-uv run python backend/admin.py stats
-uv run python backend/admin.py users
-uv run python backend/admin.py user <email>
+uv run python backend/tools/admin.py stats
+uv run python backend/tools/admin.py users
+uv run python backend/tools/admin.py user <email>
 
 # K8s (Windows Git Bash에서 MSYS_NO_PATHCONV 필수)
-MSYS_NO_PATHCONV=1 kubectl -n app exec deploy/pdf-service-aio -- python /srv/backend/admin.py stats
+MSYS_NO_PATHCONV=1 kubectl -n app exec deploy/pdf-service-aio -- python /srv/backend/tools/admin.py stats
 ```
 
 ## 빌드 및 배포
