@@ -163,12 +163,15 @@ class WebhookSender:
         """파싱 완료 Webhook 발송"""
         webhook_data = {
             "download_url": download_url,
+            "parser_version": data.get("parser_version"),
             "summary": {
                 "unique_number": data.get("unique_number"),
                 "property_type": data.get("property_type"),
                 "property_address": data.get("property_address"),
                 "section_a_count": len(data.get("section_a", [])),
                 "section_b_count": len(data.get("section_b", [])),
+                "active_section_a_count": data.get("active_section_a_count", 0),
+                "active_section_b_count": data.get("active_section_b_count", 0),
             }
         }
         

@@ -207,6 +207,8 @@ class RegistryData:
     section_b: List[SectionBEntry] = field(default_factory=list)
     raw_text: str = ""
     parse_date: str = field(default_factory=lambda: datetime.now().isoformat())
+    parser_version: str = ""
+    errors: List[str] = field(default_factory=list)
 
 
 # ==================== 유틸리티 함수 ====================
@@ -246,20 +248,29 @@ def _clean_cell(cell: Optional[str]) -> str:
 
 
 def parse_amount(text: str) -> Optional[int]:
-    """금액 문자열을 숫자로 변환"""
+    """금액 문자열을 숫자로 변환 (원정 변형 포함)"""
     if not text:
         return None
-    match = re.search(r'금\s*([\d,]+)\s*원', text)
+    match = re.search(r'금\s*([\d,]+)\s*원정?', text)
     if match:
         return int(match[1].replace(',', ''))
     return None
 
 
 def parse_date_korean(text: str) -> Optional[str]:
-    """한국어 날짜 형식 파싱"""
+    """한국어 날짜 형식 파싱 (YYYY년MM월DD일, YYYY.MM.DD, YYYY-MM-DD)"""
     if not text:
         return None
+    # 한국어 형식
     match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', text)
+    if match:
+        return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
+    # 점 구분 형식 (2025.01.03)
+    match = re.search(r'(\d{4})\.(\d{1,2})\.(\d{1,2})', text)
+    if match:
+        return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
+    # ISO 형식 (2025-01-03)
+    match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', text)
     if match:
         return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
     return None
@@ -269,9 +280,20 @@ def extract_receipt_info(text: str) -> Tuple[str, str]:
     """접수일자와 접수번호 추출 (셀 텍스트에서)"""
     date_str = ""
     number_str = ""
+    # 한국어 형식 우선
     date_match = re.search(r'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', text)
     if date_match:
         date_str = date_match[1]
+    else:
+        # 점 구분 형식 (2025.01.03)
+        date_match = re.search(r'(\d{4}\.\d{1,2}\.\d{1,2})', text)
+        if date_match:
+            date_str = date_match[1]
+        else:
+            # ISO 형식 (2025-01-03)
+            date_match = re.search(r'(\d{4}-\d{1,2}-\d{1,2})', text)
+            if date_match:
+                date_str = date_match[1]
     number_match = re.search(r'제?\s*([\d]+호)', text)
     if number_match:
         number_str = number_match[1]
@@ -279,9 +301,9 @@ def extract_receipt_info(text: str) -> Tuple[str, str]:
 
 
 def parse_resident_number(text: str) -> Optional[str]:
-    """주민등록번호/법인번호 추출"""
-    # 개인: 6자리-7자리(마스킹 포함)
-    match = re.search(r'(\d{6})-(\*{7}|\d{7})', text)
+    """주민등록번호/법인번호 추출 (*, ○ 마스킹 대응)"""
+    # 개인: 6자리-7자리(마스킹 포함: *, ○, ● 등)
+    match = re.search(r'(\d{6})-([*○●]{7}|\d{7}|\d{1,6}[*○●]+)', text)
     if match:
         return f"{match[1]}-{match[2]}"
     # 법인: 6자리-7자리
@@ -307,7 +329,7 @@ class CancellationDetector:
         self._cancelled_char_ys: Dict[int, Set[float]] = {}
 
     def analyze_page(self, page, page_index: int):
-        """페이지의 붉은 선과 붉은 글자 분석"""
+        """페이지의 붉은 선, 붉은 사각형, 붉은 글자 분석"""
         # 붉은 선 수집
         red_line_ys = set()
         for line in (page.lines or []):
@@ -315,6 +337,16 @@ class CancellationDetector:
             if self._is_red(color):
                 y = round(line['top'], 0)
                 red_line_ys.add(y)
+
+        # 붉은 사각형(박스형 말소 표시) 수집
+        for rect in (page.rects or []):
+            color = rect.get('stroking_color') or rect.get('non_stroking_color')
+            if self._is_red(color):
+                top = round(rect['top'], 0)
+                bottom = round(rect['bottom'], 0)
+                # 사각형의 전체 높이 범위를 말소 영역으로 등록
+                for y in range(int(top), int(bottom) + 1):
+                    red_line_ys.add(float(y))
 
         if red_line_ys:
             ranges = []
@@ -394,22 +426,6 @@ class CancellationDetector:
         return merged
 
 
-# ==================== 테이블 행 위치 추출 ====================
-
-def _get_table_row_y_positions(page, table_index: int = 0) -> List[float]:
-    """테이블의 각 행의 y좌표(top) 리스트 반환"""
-    try:
-        tables = page.find_tables()
-        if table_index < len(tables):
-            table = tables[table_index]
-            # 테이블의 rows는 bbox로부터 추출
-            rows = table.rows
-            return [row.bbox[1] for row in rows]  # bbox[1] = top
-    except Exception:
-        pass
-    return []
-
-
 # ==================== 메인 파싱 클래스 ====================
 
 class RegistryPDFParser:
@@ -446,6 +462,7 @@ class RegistryPDFParser:
     def __init__(self, pdf_buffer: bytes):
         self.pdf_buffer = pdf_buffer
         self.raw_text = ""
+        self.normalized_text = ""  # 헤더/푸터 제거된 텍스트 (정규식 추출용)
         self.cancellation_detector = CancellationDetector()
 
     def parse(self) -> RegistryData:
@@ -467,9 +484,11 @@ class RegistryPDFParser:
                 text = clean_page.extract_text() or ""
                 page_texts.append(text)
 
-                # 테이블 추출 + 섹션 분류
-                tables = clean_page.extract_tables()
-                for table in tables:
+                # find_tables()로 테이블 객체를 얻고, 같은 객체에서
+                # extract()와 rows(y좌표)를 모두 가져옴 — 단일 소스
+                found_tables = clean_page.find_tables()
+                for ft in found_tables:
+                    table = ft.extract()
                     if not table:
                         continue
 
@@ -486,8 +505,8 @@ class RegistryPDFParser:
                         if current_section not in all_tables_by_section:
                             all_tables_by_section[current_section] = []
 
-                        # 테이블 행에 페이지/말소 정보 추가
-                        row_ys = _get_table_row_y_positions(page)
+                        # 동일 테이블 객체에서 행 y좌표 추출
+                        row_ys = [row.bbox[1] for row in ft.rows]
                         for ri, row in enumerate(table):
                             row_y = row_ys[ri] if ri < len(row_ys) else 0.0
                             is_cancelled = self.cancellation_detector.is_row_cancelled(pi, row_y)
@@ -500,23 +519,52 @@ class RegistryPDFParser:
 
             self.raw_text = '\n'.join(page_texts)
 
+            # 헤더/푸터 제거한 normalized_text 생성 (정규식 추출용)
+            normalized_lines = []
+            for line in self.raw_text.split('\n'):
+                stripped = line.strip()
+                if stripped and not self.HEADER_RE.match(stripped) and not self.FOOTER_RE.search(stripped):
+                    normalized_lines.append(line)
+            self.normalized_text = '\n'.join(normalized_lines)
+
             # 2. 기본 정보 추출
             unique_number = self._extract_unique_number()
             property_type = self._detect_property_type()
             property_address = self._extract_address()
 
-            # 3. 섹션별 파싱
-            title_info = self._parse_title(all_tables_by_section, property_type)
-            title_info.unique_number = unique_number
-            title_info.property_type = property_type
-            title_info.address = property_address
+            # 3. 섹션별 파싱 (부분 실패 허용)
+            errors: List[str] = []
 
-            section_a = self._parse_section_a_from_tables(
-                all_tables_by_section.get('section_a', [])
-            )
-            section_b = self._parse_section_b_from_tables(
-                all_tables_by_section.get('section_b', [])
-            )
+            title_info = TitleInfo()
+            try:
+                title_info = self._parse_title(all_tables_by_section, property_type)
+                title_info.unique_number = unique_number
+                title_info.property_type = property_type
+                title_info.address = property_address
+            except Exception as e:
+                errors.append(f"표제부 파싱 실패: {e}")
+                logger.warning(f"표제부 파싱 실패: {e}")
+                title_info.unique_number = unique_number
+                title_info.property_type = property_type
+                title_info.address = property_address
+
+            section_a: List[SectionAEntry] = []
+            try:
+                section_a = self._parse_section_a_from_tables(
+                    all_tables_by_section.get('section_a', [])
+                )
+            except Exception as e:
+                errors.append(f"갑구 파싱 실패: {e}")
+                logger.warning(f"갑구 파싱 실패: {e}")
+
+            section_b: List[SectionBEntry] = []
+            try:
+                section_b = self._parse_section_b_from_tables(
+                    all_tables_by_section.get('section_b', [])
+                )
+            except Exception as e:
+                errors.append(f"을구 파싱 실패: {e}")
+                logger.warning(f"을구 파싱 실패: {e}")
 
             # 4. 텍스트 기반 말소 보강 + 관계 매핑
             self._apply_text_cancellations(section_a)
@@ -532,16 +580,17 @@ class RegistryPDFParser:
                 section_a=section_a,
                 section_b=section_b,
                 raw_text=self.raw_text,
+                errors=errors,
             )
 
     # ==================== 기본 정보 ====================
 
     def _extract_unique_number(self) -> str:
-        match = re.search(r'고유번호\s*([\d-]+)', self.raw_text)
+        match = re.search(r'고유번호\s*([\d-]+)', self.normalized_text)
         return match[1] if match else ""
 
     def _detect_property_type(self) -> str:
-        first_page = self.raw_text[:500]
+        first_page = self.normalized_text[:500]
         if '- 토지 -' in first_page or '[토지]' in first_page:
             return 'land'
         if '- 집합건물 -' in first_page or '[집합건물]' in first_page:
@@ -550,7 +599,7 @@ class RegistryPDFParser:
 
     def _extract_address(self) -> str:
         pattern = r'\[(?:토지|건물|집합건물)\]\s*([^\n]+)'
-        match = re.search(pattern, self.raw_text)
+        match = re.search(pattern, self.normalized_text)
         if match:
             addr = match[1].strip()
             addr = _WATERMARK_RE.sub('', addr).strip()
@@ -589,7 +638,7 @@ class RegistryPDFParser:
             r'\[도로명주소\]\s*\n?\s*'
             r'((?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)'
             r'[^\n\[]{5,})',
-            self.raw_text
+            self.normalized_text
         )
         if road_match:
             info.road_address = _clean_text(road_match[1])
@@ -968,7 +1017,7 @@ class RegistryPDFParser:
 
         # 공유자/지분 패턴 (복수 공유자)
         for m in re.finditer(
-            r'지분\s+\d+분의\s+\d+\s+(\S+)\s+([\d]{6}-[\d*]{7}|[\d]{6}-[\d]{7})',
+            r'지분\s+\d+분의\s+\d+\s+(\S+)\s+([\d]{6}-[\d*○●]{7}|[\d]{6}-[\d]{7})',
             full
         ):
             name = m[1]
@@ -982,7 +1031,7 @@ class RegistryPDFParser:
         # 소유자 (단독 소유자 — 지분 없는 경우)
         if not entry.owners:
             for m in re.finditer(
-                r'소유자\s+(\S+)\s+([\d]{6}-[\d*]{7}|[\d]{6}-[\d]{7})',
+                r'소유자\s+(\S+)\s+([\d]{6}-[\d*○●]{7}|[\d]{6}-[\d]{7})',
                 full
             ):
                 name = m[1]
@@ -1279,10 +1328,14 @@ class RegistryPDFParser:
 
 # ==================== 외부 인터페이스 ====================
 
+PARSER_VERSION = "2.1.0"
+
+
 def parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]:
     """PDF 파싱 실행 (외부 인터페이스)"""
     parser = RegistryPDFParser(pdf_buffer)
     data = parser.parse()
+    data.parser_version = PARSER_VERSION
 
     result = _to_dict(data)
 

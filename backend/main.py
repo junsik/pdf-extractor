@@ -3,6 +3,7 @@
 """
 import os
 import io
+import json
 import uuid
 import asyncio
 from datetime import datetime, date
@@ -284,7 +285,7 @@ async def parse_pdf(
         parse_record.unique_number = parsed_data.get("unique_number", "")
         parse_record.property_type = parsed_data.get("property_type", "")
         parse_record.property_address = parsed_data.get("property_address", "")
-        parse_record.result_json = str(parsed_data)  # JSON 문자열로 저장
+        parse_record.result_json = json.dumps(parsed_data, ensure_ascii=False)
         parse_record.section_a_count = len(parsed_data.get("section_a", []))
         parse_record.section_b_count = len(parsed_data.get("section_b", []))
         parse_record.completed_at = datetime.utcnow()

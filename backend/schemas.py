@@ -175,10 +175,59 @@ class SectionBEntry(BaseModel):
     raw_text: Optional[str] = None
 
 
+class LandTitleEntry(BaseModel):
+    """표제부 — 토지의 표시 항목"""
+    display_number: str = ""
+    receipt_date: str = ""
+    location: str = ""
+    land_type: str = ""
+    area: str = ""
+    cause_and_other: str = ""
+    is_cancelled: bool = False
+
+
+class BuildingTitleEntry(BaseModel):
+    """표제부 — 건물의 표시 항목"""
+    display_number: str = ""
+    receipt_date: str = ""
+    location_or_number: str = ""
+    building_detail: str = ""
+    cause_and_other: str = ""
+    is_cancelled: bool = False
+
+
+class ExclusivePartEntry(BaseModel):
+    """전유부분의 건물의 표시"""
+    display_number: str = ""
+    receipt_date: str = ""
+    building_number: str = ""
+    building_detail: str = ""
+    cause_and_other: str = ""
+    is_cancelled: bool = False
+
+
+class LandRightEntry(BaseModel):
+    """대지권의 목적인 토지의 표시"""
+    display_number: str = ""
+    location: str = ""
+    land_type: str = ""
+    area: str = ""
+    cause_and_other: str = ""
+
+
+class LandRightRatioEntry(BaseModel):
+    """대지권의 표시"""
+    display_number: str = ""
+    land_right_type: str = ""
+    land_right_ratio: str = ""
+    cause_and_other: str = ""
+    is_cancelled: bool = False
+
+
 class TitleInfo(BaseModel):
     """표제부 정보"""
     unique_number: str
-    property_type: str  # building, aggregate_building
+    property_type: str  # land, building, aggregate_building
     address: str
     road_address: Optional[str] = None
     building_name: Optional[str] = None
@@ -190,6 +239,15 @@ class TitleInfo(BaseModel):
     land_right_ratio: Optional[str] = None
     exclusive_area: Optional[float] = None
     total_floor_area: Optional[float] = None
+    # 토지 필드
+    land_type: Optional[str] = None
+    land_area: Optional[str] = None
+    # 상세 엔트리 리스트
+    land_entries: List[LandTitleEntry] = []
+    building_entries: List[BuildingTitleEntry] = []
+    exclusive_part_entries: List[ExclusivePartEntry] = []
+    land_right_entries: List[LandRightEntry] = []
+    land_right_ratio_entries: List[LandRightRatioEntry] = []
 
 
 class RegistryData(BaseModel):
@@ -202,12 +260,16 @@ class RegistryData(BaseModel):
     section_b: List[SectionBEntry] = []
     raw_text: Optional[str] = None
     parse_date: str
-    
+    parser_version: Optional[str] = None
+
     # 통계
     section_a_count: int = 0
     section_b_count: int = 0
     active_section_a_count: int = 0  # 말소되지 않은 갑구 항목
     active_section_b_count: int = 0  # 말소되지 않은 을구 항목
+
+    # 섹션별 에러 (부분 실패 시)
+    errors: List[str] = []
 
 
 class ParseRequest(BaseModel):
