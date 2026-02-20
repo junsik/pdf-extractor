@@ -179,6 +179,8 @@ class SectionBEntry:
     land_rent: Optional[str] = None                 # 지료
     # --- 질권 ---
     bond_amount: Optional[int] = None               # 채권액 (원)
+    # --- 공동담보 ---
+    collateral_list: Optional[str] = None           # 공동담보목록 번호 (예: '제2016-194호')
     # --- 말소 관련 ---
     is_cancelled: bool = False                      # 말소 여부
     cancelled_by_rank: Optional[str] = None         # [수동] 이 항목을 말소시킨 순위번호
@@ -186,6 +188,7 @@ class SectionBEntry:
     cancellation_cause: Optional[str] = None        # 말소원인
     cancels_rank: Optional[str] = None              # [능동] 이 항목이 말소하는 대상 순위번호
     raw_text: str = ""                              # 원본 셀 텍스트
+    remarks: Optional[str] = None                   # 기타사항
 
 
 @dataclass
@@ -353,6 +356,7 @@ class RegistryPDFParser:
         # 파싱 대상 아닌 섹션 → _skip 접두사로 구분
         '_skip_collateral': re.compile(r'공\s*동\s*담\s*보\s*목\s*록'),
         '_skip_sale_list': re.compile(r'매\s*각\s*물\s*건\s*목\s*록'),
+        '_skip_trade_list': re.compile(r'매\s*매\s*목\s*록'),
     }
 
     # 페이지 헤더/푸터 패턴
@@ -1002,7 +1006,7 @@ class RegistryPDFParser:
             self._extract_section_a_details(entry, detail_text, cause_text)
 
             # 권리자가 없는 항목(등기명의인표시변경/경정 등)은 상세 텍스트를 기타사항으로
-            if not entry.owners and not entry.remarks and detail_text:
+            if not entry.owners and not entry.creditor and not entry.remarks and detail_text:
                 entry.remarks = detail_text
 
             # 말소 등기 대상 번호
@@ -1119,14 +1123,20 @@ class RegistryPDFParser:
             '매매예약', '매매', '상속', '증여', '신탁', '경락', '판결', '교환',
             '협의분할', '법원경매', '공매', '설정계약',
             '확정채권양도', '확정채무의면책적인수', '면책적인수', '취급지점변경',
-            '압류해제', '해지', '해제', '취하', '취소결정',
+            '압류해제', '압류', '해지', '해제', '취하', '취소결정',
             '전거', '행정구역변경', '도로명주소변경', '명칭변경', '주소변경',
         ]
         for c in causes:
             if c in text.replace(' ', ''):
                 return c
-        # 법원 결정 패턴
-        court_match = re.search(r'((?:\S+법원|지방법원)\S*의\s*\S+)', text)
+        # 법원 결정 패턴 (공백 제거 후 매칭 — PDF 줄바꿈 분절 대응, 사건번호 포함)
+        compact = text.replace(' ', '')
+        # 선행 날짜를 제거하여 \w+가 날짜까지 탐욕적으로 매칭하는 것을 방지
+        compact_no_date = re.sub(r'\d{4}년\d{1,2}월\d{1,2}일', '', compact)
+        court_match = re.search(
+            r'(\w+법원\w*의\w+(?:\([^)]*\))?)',
+            compact_no_date
+        )
         if court_match:
             return court_match[1]
         return text[:30] if text else ""
@@ -1227,6 +1237,10 @@ class RegistryPDFParser:
                 entry.creditor = CreditorInfo(
                     name=rights_match[1], resident_number=rn, address=addr
                 )
+                # 처분청 등 추가 정보를 remarks로
+                extra = re.search(r'처분청\s+(.+)', full[rights_match.end():])
+                if extra and not entry.remarks:
+                    entry.remarks = f"처분청 {clean_text(extra[1])}"
 
         # 청구금액
         entry.claim_amount = parse_amount(full)
@@ -1262,7 +1276,12 @@ class RegistryPDFParser:
         # 채무자
         debtor_match = re.search(r'채무자\s+(\S+)', full)
         if debtor_match:
-            rn = parse_resident_number(full[debtor_match.start():])
+            # 다음 역할 키워드까지만 탐색 (근저당권자 등의 주민번호 오인식 방지)
+            debtor_segment = re.split(
+                r'근저당권자|저당권자|채권자|권리자|전세권자|임차권자|지상권자',
+                full[debtor_match.start():]
+            )[0]
+            rn = parse_resident_number(debtor_segment)
             addr, _ = self._extract_address_after(full, debtor_match.end())
             entry.debtor = OwnerInfo(
                 name=debtor_match[1], resident_number=rn, address=addr
@@ -1272,8 +1291,9 @@ class RegistryPDFParser:
         mortgagee_match = re.search(r'근저당권자\s+(\S+)', full)
         if mortgagee_match:
             rn = parse_resident_number(full[mortgagee_match.start():])
+            addr, _ = self._extract_address_after(full, mortgagee_match.end())
             entry.mortgagee = CreditorInfo(
-                name=mortgagee_match[1], resident_number=rn
+                name=mortgagee_match[1], resident_number=rn, address=addr
             )
 
         # 채권자 (질권 등)
@@ -1281,8 +1301,9 @@ class RegistryPDFParser:
             creditor_match = re.search(r'채권자\s+(\S+)', full)
             if creditor_match:
                 rn = parse_resident_number(full[creditor_match.start():])
+                addr, _ = self._extract_address_after(full, creditor_match.end())
                 entry.mortgagee = CreditorInfo(
-                    name=creditor_match[1], resident_number=rn
+                    name=creditor_match[1], resident_number=rn, address=addr
                 )
 
         # 임차보증금
@@ -1333,12 +1354,20 @@ class RegistryPDFParser:
         if rent_match:
             entry.land_rent = rent_match[1]
 
-        # 공동담보
+        # 지상권자
+        if not entry.mortgagee:
+            surface_match = re.search(r'지상권자\s+(\S+)', full)
+            if surface_match:
+                rn = parse_resident_number(full[surface_match.start():])
+                addr, _ = self._extract_address_after(full, surface_match.end())
+                entry.mortgagee = CreditorInfo(
+                    name=surface_match[1], resident_number=rn, address=addr
+                )
+
+        # 공동담보목록
         collateral = re.search(r'공동담보목록\s+(\S+)', full)
         if collateral:
-            if not entry.raw_text:
-                entry.raw_text = ""
-            entry.raw_text += f" 공동담보: {collateral[1]}"
+            entry.collateral_list = collateral[1]
 
     # ==================== 헬퍼 ====================
 
@@ -1347,11 +1376,12 @@ class RegistryPDFParser:
         """특정 위치 이후의 주소 및 기타사항 추출. Returns (address, remarks)."""
         remaining = text[pos:pos + 200]
         remarks: Optional[str] = None
-        # 법조문/기타사항 텍스트 시작 지점 분리 (부동산등기법, 규정에 의하여, 전산이기 등)
-        # 매매목록/공동담보목록 등 참조번호, 날짜 패턴도 주소 종료 기준으로 처리
+        # 주소 종료 기준: 법조문, 참조번호, 날짜, 역할 키워드
         stop = re.search(
             r'(?:부동산|민법|상법|형법|세법|등기)\S*법\b|제\d+조|규정에\s*의하여|전산이기|'
-            r'매매목록|공동담보목록|\d{4}년\s*\d{1,2}월\s*\d{1,2}일',
+            r'매매목록|공동담보목록|\d{4}년\s*\d{1,2}월\s*\d{1,2}일|'
+            r'근저당권자|저당권자|채권자|채무자|소유자|공유자|권리자|'
+            r'임차권자|전세권자|지상권자|가등기권자|수탁자|처분청',
             remaining
         )
         if stop:
@@ -1414,7 +1444,10 @@ class RegistryPDFParser:
 
             # 다른 섹션의 컬럼 헤더/타이틀이 섞여 들어오는 경우 병합으로 데이터가 오염되는 것을 방지
             if rank and not re.match(r"\d", rank):
-                if any(k in rank for k in ("등기명의인", "순위번호", "주요등기사항", "대상소유자", "공동담보", "매각")):
+                if any(k in rank for k in (
+                    "등기명의인", "순위번호", "주요등기사항", "대상소유자",
+                    "공동담보", "매각", "매매", "목록번호", "거래가액",
+                )):
                     continue
 
             # 순위번호가 있으면 새 항목

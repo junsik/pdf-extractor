@@ -242,9 +242,21 @@ def collect_parser_text(result: Dict[str, Any]) -> Dict[str, str]:
 
 # ==================== 토큰화 + 스코어 ====================
 
+def _normalize_token_text(text: str) -> str:
+    """숫자-한글 경계에 공백 삽입하여 토큰 분리를 일관되게 함.
+
+    "2019년10월31일" → "2019 년 10 월 31 일"
+    "금130,000,000원" → "금 130,000,000 원"
+    """
+    text = re.sub(r'(\d)([\uac00-\ud7a3])', r'\1 \2', text)
+    text = re.sub(r'([\uac00-\ud7a3])(\d)', r'\1 \2', text)
+    return text
+
+
 def tokenize(text: str) -> Counter:
     if not text:
         return Counter()
+    text = _normalize_token_text(text)
     tokens = re.findall(r"[\w가-힣]+", text)
     return Counter(t for t in tokens if len(t) >= 2 and t not in NOISE_TOKENS)
 

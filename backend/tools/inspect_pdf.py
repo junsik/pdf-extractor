@@ -48,22 +48,126 @@ def render_pages_b64(pdf_path: str, dpi: int = 120) -> list[str]:
     return images
 
 
+# ── 파서 결과 캐시 ────────────────────────────────────────────────────────────
+
+CACHE_DIR = "inspect/cache"
+
+
+def _cache_path(pdf_path: str, version: str) -> str:
+    stem = Path(pdf_path).stem
+    return os.path.join(CACHE_DIR, f"{stem}_v{version}.json")
+
+
+def _load_cached(pdf_path: str, version: str) -> dict | None:
+    path = _cache_path(pdf_path, version)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_cache(pdf_path: str, version: str, result: dict):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = _cache_path(pdf_path, version)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+
+
+# ── 점수 히스토리 ────────────────────────────────────────────────────────────
+
+HISTORY_FILE = "inspect/history.json"
+MAX_HISTORY_PER_KEY = 20
+
+
+def _load_history() -> list[dict]:
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_score_history(score: PDFScore, version: str):
+    """점수를 히스토리에 추가 (파일+버전별 최근 MAX_HISTORY_PER_KEY개 유지)"""
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    history = _load_history()
+    history.append({
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": version,
+        "filename": score.filename,
+        "overall": score.overall,
+        "title": score.title,
+        "section_a": score.section_a,
+        "section_b": score.section_b,
+        "gt_tokens": score.gt_tokens,
+        "parser_tokens": score.parser_tokens,
+    })
+
+    # 파일+버전별로 최근 항목만 유지
+    from collections import defaultdict
+    by_key: dict = defaultdict(list)
+    for h in history:
+        k = f"{h['filename']}:{h['version']}"
+        by_key[k].append(h)
+    trimmed = []
+    for entries in by_key.values():
+        trimmed.extend(entries[-MAX_HISTORY_PER_KEY:])
+    trimmed.sort(key=lambda h: h.get("date", ""))
+
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
+
+
+def _get_previous_score(version: str, filename: str) -> float | None:
+    """직전 실행의 종합 점수 반환 (없으면 None)"""
+    history = _load_history()
+    matching = [h for h in history
+                if h["version"] == version and h["filename"] == filename]
+    if len(matching) < 2:
+        return None
+    # 마지막 항목은 방금 저장된 것, 그 직전 것을 반환
+    return matching[-2]["overall"]
+
+
 # ── 파서 실행 ─────────────────────────────────────────────────────────────────
 
 def run_parsers(pdf_path: str, parser_versions: list[str],
-                doc_type: str = "registry") -> dict:
-    """버전별 파서 결과 반환"""
+                doc_type: str = "registry",
+                fresh: bool = False) -> tuple[dict, set[str]]:
+    """버전별 파서 결과 반환. 최신 버전만 항상 실행, 나머지는 캐시 사용.
+
+    Returns:
+        (results, cached_versions) — cached_versions는 캐시에서 로드된 버전 집합
+    """
+    latest = parser_versions[-1]  # 정렬된 버전 목록의 마지막 = 최신
     results = {}
-    with open(pdf_path, "rb") as f:
-        pdf_bytes = f.read()
+    cached_vers: set[str] = set()
+    pdf_bytes = None
+
     for ver in parser_versions:
+        # 최신 버전이 아니고, fresh 모드가 아니면 캐시 시도
+        if not fresh and ver != latest:
+            cached = _load_cached(pdf_path, ver)
+            if cached:
+                results[ver] = cached
+                cached_vers.add(ver)
+                continue
+
+        # PDF 읽기 (필요할 때 한 번만)
+        if pdf_bytes is None:
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+
         try:
             p = get_parser(doc_type, ver)
             pr = p.parse(pdf_bytes)
-            results[ver] = {"ok": True, "data": pr.data, "errors": pr.errors}
+            result = {"ok": True, "data": pr.data, "errors": pr.errors}
         except Exception as e:
-            results[ver] = {"ok": False, "data": {}, "errors": [str(e)]}
-    return results
+            result = {"ok": False, "data": {}, "errors": [str(e)]}
+
+        results[ver] = result
+        _save_cache(pdf_path, ver, result)
+
+    return results, cached_vers
 
 
 # ── 벤치마크 스코어링 ────────────────────────────────────────────────────────
@@ -163,133 +267,6 @@ def _render_missing_tokens(score: PDFScore) -> str:
         f'</details>')
 
 
-def _kv_table(d: dict, keys: list) -> str:
-    rows = []
-    for k, label in keys:
-        v = d.get(k)
-        if v is None or v == "" or v == 0 or v == []:
-            continue
-        rows.append(f'<div class="kv"><dt>{label}</dt><dd>{_esc(v)}</dd></div>')
-    return "".join(rows) if rows else '<span style="color:#6c7086">-</span>'
-
-
-def _render_entry_a(e: dict) -> str:
-    c_cls = " cancelled" if e.get("is_cancelled") else ""
-    owners = ", ".join(o["name"] for o in e.get("owners", []) if o.get("name"))
-    person = owners or (e.get("creditor") or {}).get("name", "")
-    amt = (f'<span class="amount"> 금{e["claim_amount"]:,}원</span>'
-           if e.get("claim_amount") else "")
-    cancel = (f'<br><span style="color:#f38ba8;font-size:.75rem">'
-              f'→ {e["cancels_rank"]}번 말소</span>'
-              if e.get("cancels_rank") else "")
-    return (f'<div class="entry{c_cls}">'
-            f'<span class="rank">{e["rank_number"]}</span> '
-            f'<span class="regtype">{_esc(e["registration_type"])}</span> '
-            f'<span class="date"> {_esc(e.get("receipt_date",""))}</span> '
-            f'<span class="person"> {_esc(person)}</span>{amt}{cancel}'
-            f'</div>')
-
-
-def _render_entry_b(e: dict) -> str:
-    c_cls = " cancelled" if e.get("is_cancelled") else ""
-    m = (e.get("mortgagee") or {}).get("name", "")
-    amt = ""
-    if e.get("max_claim_amount"):
-        amt = f'<span class="amount"> 채권최고액 {e["max_claim_amount"]:,}원</span>'
-    elif e.get("deposit_amount"):
-        amt = f'<span class="amount"> 보증금 {e["deposit_amount"]:,}원</span>'
-    cancel = (f'<br><span style="color:#f38ba8;font-size:.75rem">'
-              f'→ {e["cancels_rank"]}번 말소</span>'
-              if e.get("cancels_rank") else "")
-    purpose = (f'<br><span style="color:#a6e3a1;font-size:.75rem">'
-               f'목적: {_esc(e["purpose"])}</span>'
-               if e.get("purpose") else "")
-    return (f'<div class="entry{c_cls}">'
-            f'<span class="rank">{e["rank_number"]}</span> '
-            f'<span class="regtype">{_esc(e["registration_type"])}</span> '
-            f'<span class="date"> {_esc(e.get("receipt_date",""))}</span> '
-            f'<span class="person"> {_esc(m)}</span>{amt}{purpose}{cancel}'
-            f'</div>')
-
-
-def _render_title(ti: dict) -> str:
-    keys = [
-        ("land_type", "지목"), ("land_area", "면적"),
-        ("building_name", "건물명"), ("building_type", "건물종류"),
-        ("structure", "구조"), ("roof_type", "지붕"),
-        ("floors", "층수"), ("exclusive_area", "전유면적"),
-        ("land_right_ratio", "대지권비율"), ("road_address", "도로명주소"),
-        ("land_right_area", "대지권면적"),
-    ]
-    parts = [_kv_table(ti, keys)]
-    if ti.get("areas"):
-        area_rows = "".join(
-            f'<div class="kv"><dt>{_esc(a.get("floor",""))}</dt>'
-            f'<dd>{_esc(a.get("area",""))}㎡</dd></div>'
-            for a in ti["areas"][:10])
-        parts.append(
-            f'<div style="margin-top:6px;border-top:1px solid #313244;'
-            f'padding-top:6px">{area_rows}</div>')
-    if ti.get("land_entries"):
-        le_rows = "".join(
-            f'<div style="font-size:.75rem;color:#6c7086;padding:1px 0">'
-            f'{_esc(str(le))}</div>'
-            for le in ti["land_entries"][:5])
-        parts.append(
-            f'<div style="margin-top:6px;border-top:1px solid #313244;'
-            f'padding-top:6px">{le_rows}</div>')
-    return "".join(parts)
-
-
-def _render_summary_cards(result: dict) -> str:
-    """요약 카드 HTML (주소·표제부·갑구·을구·경고)"""
-    data = result["data"]
-    ti = data.get("title_info", {})
-    sa = data.get("section_a", [])
-    sb = data.get("section_b", [])
-
-    addr = (f'<div class="section-card"><div class="section-head">주소</div>'
-            f'<div class="section-body" style="font-size:.82rem">'
-            f'{_esc(data.get("property_address",""))}</div></div>')
-
-    title = (f'<div class="section-card"><div class="section-head">표제부 '
-             f'<span class="cnt">{_esc(data.get("property_type",""))} · '
-             f'{_esc(data.get("unique_number",""))}</span></div>'
-             f'<div class="section-body">{_render_title(ti)}</div></div>')
-
-    sa_cnt = data.get("section_a_count", len(sa))
-    sa_active = data.get("active_section_a_count",
-                         sum(1 for e in sa if not e.get("is_cancelled")))
-    sa_body = "".join(_render_entry_a(e) for e in sa)
-    sa_html = (f'<div class="section-card"><div class="section-head">갑구 '
-               f'<span class="cnt">총 {sa_cnt}건 · 활성 {sa_active}건</span></div>'
-               f'<div class="section-body">'
-               f'{sa_body or "<span style=color:#6c7086>없음</span>"}'
-               f'</div></div>')
-
-    sb_cnt = data.get("section_b_count", len(sb))
-    sb_active = data.get("active_section_b_count",
-                         sum(1 for e in sb if not e.get("is_cancelled")))
-    sb_body = "".join(_render_entry_b(e) for e in sb)
-    sb_html = (f'<div class="section-card"><div class="section-head">을구 '
-               f'<span class="cnt">총 {sb_cnt}건 · 활성 {sb_active}건</span></div>'
-               f'<div class="section-body">'
-               f'{sb_body or "<span style=color:#6c7086>없음</span>"}'
-               f'</div></div>')
-
-    warnings = result.get("errors", []) + data.get("parse_warnings", [])
-    warn = ""
-    if warnings:
-        items = "".join(
-            f'<div style="padding:2px 0">⚠ {_esc(w)}</div>' for w in warnings)
-        warn = (f'<div class="section-card">'
-                f'<div class="section-head" style="color:#f9e2af">경고</div>'
-                f'<div class="section-body" style="font-size:.78rem;color:#f9e2af">'
-                f'{items}</div></div>')
-
-    return f"{addr}{title}{sa_html}{sb_html}{warn}"
-
-
 def _render_diff_controls(ver: str, all_versions: list[str]) -> str:
     """비교 대상 선택 드롭다운"""
     others = [v for v in all_versions if v != ver]
@@ -317,15 +294,6 @@ def _render_version_panel(ver: str, result: dict, score=None,
     # 벤치마크 점수 바
     if score:
         parts.append(_render_score_bar(score))
-
-    # 요약 카드 (벤치마크 있으면 접힘, 없으면 열림)
-    has_score = score and score.gt_tokens > 0
-    open_attr = "" if has_score else " open"
-    parts.append(
-        f'<details class="summary-wrap"{open_attr}>'
-        f'<summary class="summary-toggle">요약 카드</summary>'
-        f'<div class="summary-cards">{_render_summary_cards(result)}</div>'
-        f'</details>')
 
     # 누락 토큰
     if score:
@@ -377,23 +345,6 @@ header .meta { color: #6c7086; font-size: .82rem; }
                 display: flex; justify-content: space-between; align-items: center; }
 .section-head .cnt { font-size: .72rem; color: #6c7086; font-weight: 400; }
 .section-body { padding: 10px 12px; }
-
-.summary-wrap { margin-bottom: 8px; }
-.summary-toggle { cursor: pointer; padding: 8px 12px; background: #181825;
-                  border: 1px solid #313244; border-radius: 6px;
-                  font-size: .78rem; color: #6c7086; display: block; }
-.summary-toggle:hover { color: #cdd6f4; }
-.summary-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-
-.entry { padding: 6px 0; border-bottom: 1px solid #313244; font-size: .8rem; line-height: 1.5; }
-.entry:last-child { border-bottom: none; }
-.entry.cancelled { opacity: .45; text-decoration: line-through; }
-.rank { display: inline-block; min-width: 24px; font-weight: 700; color: #89b4fa; }
-.regtype { color: #a6e3a1; } .date { color: #fab387; }
-.person { color: #f9e2af; } .amount { color: #cba6f7; }
-
-.kv { display: grid; grid-template-columns: 7em 1fr; gap: 4px 10px; font-size: .8rem; padding: 2px 0; }
-.kv dt { color: #6c7086; } .kv dd { color: #cdd6f4; }
 .error { color: #f38ba8; padding: 8px; font-size: .8rem; }
 
 /* 벤치마크 점수 바 */
@@ -669,6 +620,39 @@ def _fmt(val):
     return f"{val:.1f}" if val is not None else "N/A"
 
 
+def _print_history(filenames: list[str], versions: list[str]):
+    """점수 히스토리 출력"""
+    history = _load_history()
+    if not history:
+        print("히스토리 없음")
+        return
+
+    w = 70
+    for ver in versions:
+        for fname in filenames:
+            matching = [h for h in history
+                        if h["version"] == ver and h["filename"] == fname]
+            if not matching:
+                continue
+            print(f"\n{'─' * w}")
+            print(f"  v{ver} — {fname}")
+            print(f"{'─' * w}")
+            prev = None
+            for h in matching:
+                delta = ""
+                if prev is not None:
+                    d = h["overall"] - prev
+                    arrow = "▲" if d > 0 else "▼" if d < 0 else "="
+                    delta = f"  {arrow} {d:+.1f}"
+                prev = h["overall"]
+                t = _fmt(h.get("title"))
+                a = _fmt(h.get("section_a"))
+                b = _fmt(h.get("section_b"))
+                print(f"  {h['date']}  {h['overall']:5.1f}/100{delta}"
+                      f"  (표제 {t} | 갑 {a} | 을 {b})")
+    print()
+
+
 def _print_batch_summary(all_scores, versions):
     w = 60
     print(f"\n{'=' * w}")
@@ -705,10 +689,14 @@ def main():
     ap.add_argument("--type", "-t", default="registry", help="문서 타입")
     ap.add_argument("--dpi", type=int, default=120, help="렌더링 DPI")
     ap.add_argument("--out", "-o", default="", help="출력 HTML 경로 (단일 파일)")
+    ap.add_argument("--fresh", action="store_true",
+                    help="캐시 무시, 모든 버전 새로 파싱")
     ap.add_argument("--no-benchmark", action="store_true",
                     help="벤치마크 스코어링 건너뛰기")
     ap.add_argument("--save", "-s", action="store_true",
                     help="벤치마크 히스토리 JSON 저장")
+    ap.add_argument("--history", action="store_true",
+                    help="점수 히스토리 조회")
     args = ap.parse_args()
 
     pdf_paths = _resolve_pdf_paths(args.pdf)
@@ -720,6 +708,12 @@ def main():
         versions = [v.strip().lstrip("v") for v in args.parsers.split(",")]
     else:
         versions = list_versions(args.type)
+
+    # --history 모드: 히스토리만 출력하고 종료
+    if args.history:
+        filenames = [Path(p).name for p in pdf_paths]
+        _print_history(filenames, versions)
+        return
 
     batch = len(pdf_paths) > 1
     all_scores: dict[str, list[PDFScore]] = {}
@@ -733,17 +727,30 @@ def main():
         print(f"  {len(page_images)}페이지")
 
         print(f"  파싱 ({', '.join(f'v{v}' for v in versions)})…")
-        results = run_parsers(pdf_path, versions, doc_type=args.type)
+        results, cached_vers = run_parsers(
+            pdf_path, versions, doc_type=args.type, fresh=args.fresh)
         for ver, r in results.items():
-            print(f"    v{ver}: {'OK' if r['ok'] else 'ERROR'}")
+            tag = "캐시" if ver in cached_vers else "실행"
+            status = "OK" if r["ok"] else "ERROR"
+            print(f"    v{ver}: {status} ({tag})")
 
         scores = None
         if not args.no_benchmark:
             print("  스코어링…")
             scores = compute_scores(pdf_path, results, doc_type=args.type)
             for ver, sc in scores.items():
-                status = f"{sc.overall:.1f}/100" if sc.gt_tokens > 0 else "N/A"
-                print(f"    v{ver}: {status}")
+                if sc.gt_tokens == 0:
+                    print(f"    v{ver}: N/A")
+                    continue
+                # 히스토리 저장 후 delta 계산
+                _save_score_history(sc, ver)
+                prev = _get_previous_score(ver, sc.filename)
+                delta = ""
+                if prev is not None:
+                    d = sc.overall - prev
+                    arrow = "▲" if d > 0 else "▼" if d < 0 else "="
+                    delta = f" ({arrow} {d:+.1f})"
+                print(f"    v{ver}: {sc.overall:.1f}/100{delta}")
                 all_scores.setdefault(ver, []).append(sc)
 
         html = build_html(pdf_path, page_images, results, scores=scores)
