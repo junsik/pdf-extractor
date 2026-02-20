@@ -42,7 +42,7 @@ from parsers.common.pdf_utils import is_watermark_char, WATERMARK_RE
 
 DEFAULT_UPLOAD_DIR = "upload"
 BENCHMARK_JSON = "benchmark-history.json"
-BENCHMARK_MD = "BENCHMARK.md"
+BENCHMARKS_DIR = "benchmarks"
 MAX_HISTORY = 5
 
 # ground truth에서 제외할 구조 노이즈 토큰
@@ -109,6 +109,7 @@ class PDFScore:
     parser_tokens: int = 0
     missing_top20: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    parse_output: Optional[Dict] = field(default=None)
 
 
 @dataclass
@@ -304,6 +305,7 @@ def benchmark_single(pdf_path: str, parser: BaseParser) -> PDFScore:
         score.gt_tokens = sum(gt_full.values())
         score.parser_tokens = sum(min(gt_full[t], p_full.get(t, 0)) for t in gt_full)
         score.missing_top20 = find_missing(gt_full, p_full)
+        score.parse_output = result
 
     except Exception as e:
         score.errors.append(f"벤치마크 실패: {e}")
@@ -317,7 +319,7 @@ def run_benchmark(pdf_paths: List[str], parser: BaseParser,
     report = BenchmarkReport(
         document_type=document_type,
         parser_version=parser.parser_version(),
-        date=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         file_count=len(pdf_paths),
     )
 
@@ -383,16 +385,24 @@ def print_report(report: BenchmarkReport, verbose: bool = False):
 
 
 def print_json(report: BenchmarkReport):
-    print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+    d = asdict(report)
+    for s in d.get("scores", []):
+        s.pop("parse_output", None)
+    print(json.dumps(d, ensure_ascii=False, indent=2))
 
 
 # ==================== JSON 히스토리 ====================
 
 def save_to_json(report: BenchmarkReport, path: str = BENCHMARK_JSON):
-    history = load_history(path)
-    key = f"{report.document_type}:{report.parser_version}"
+    # ── 1. 상세 결과 파일 저장 (parse_output 포함) ──────────────────
+    os.makedirs(BENCHMARKS_DIR, exist_ok=True)
+    date_tag = report.date.replace("-", "").replace(" ", "_").replace(":", "")
+    ver_tag = report.parser_version.replace(".", "_")
+    detail_filename = f"{date_tag}_{report.document_type}_v{ver_tag}.json"
+    detail_path = os.path.join(BENCHMARKS_DIR, detail_filename)
+    result_file_url = f"{BENCHMARKS_DIR}/{detail_filename}"  # URL용 슬래시 경로
 
-    entry = {
+    detail = {
         "document_type": report.document_type,
         "version": report.parser_version,
         "date": report.date,
@@ -402,6 +412,36 @@ def save_to_json(report: BenchmarkReport, path: str = BENCHMARK_JSON):
         "section_a": report.section_a_avg,
         "section_b": report.section_b_avg,
         "details": [
+            {
+                "file": s.filename,
+                "type": s.property_type,
+                "score": s.overall,
+                "title": s.title,
+                "section_a": s.section_a,
+                "section_b": s.section_b,
+                "gt_tokens": s.gt_tokens,
+                "parser_tokens": s.parser_tokens,
+                "parse_output": s.parse_output,
+            }
+            for s in report.scores
+        ],
+    }
+    with open(detail_path, "w", encoding="utf-8") as f:
+        json.dump(detail, f, ensure_ascii=False, indent=2)
+
+    # ── 2. 히스토리 요약 파일 (parse_output 제외, result_file 링크) ──
+    history = load_history(path)
+    entry = {
+        "document_type": report.document_type,
+        "version": report.parser_version,
+        "date": report.date,
+        "files": report.file_count,
+        "overall": report.average,
+        "title": report.title_avg,
+        "section_a": report.section_a_avg,
+        "section_b": report.section_b_avg,
+        "result_file": result_file_url,
+        "details": [
             {"file": s.filename, "type": s.property_type, "score": s.overall,
              "title": s.title, "section_a": s.section_a, "section_b": s.section_b,
              "gt_tokens": s.gt_tokens, "parser_tokens": s.parser_tokens}
@@ -409,13 +449,22 @@ def save_to_json(report: BenchmarkReport, path: str = BENCHMARK_JSON):
         ],
     }
 
-    history = [h for h in history
-               if f"{h.get('document_type', 'registry')}:{h['version']}" != key]
+    # 버전별 최신 MAX_HISTORY개 유지
     history.append(entry)
+    from collections import defaultdict
+    by_key: dict = defaultdict(list)
+    for h in history:
+        k = f"{h.get('document_type', 'registry')}:{h['version']}"
+        by_key[k].append(h)
+    trimmed = []
+    for entries in by_key.values():
+        trimmed.extend(entries[-MAX_HISTORY:])
+    trimmed.sort(key=lambda h: h.get("date", ""))
 
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-    print(f"  Saved to {path} ({report.document_type} v{report.parser_version})")
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
+    print(f"  Saved {detail_path}")
+    print(f"  Saved {path} ({report.document_type} v{report.parser_version})")
 
 
 def load_history(path: str = BENCHMARK_JSON) -> List[Dict]:
@@ -423,82 +472,6 @@ def load_history(path: str = BENCHMARK_JSON) -> List[Dict]:
         return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-# ==================== Markdown 리포트 ====================
-
-def generate_report_md(doc_type: str = "registry",
-                       path: str = BENCHMARK_JSON, out: str = BENCHMARK_MD):
-    history = [h for h in load_history(path)
-               if h.get("document_type", "registry") == doc_type]
-    if not history:
-        print("히스토리 없음. 먼저 --save로 벤치마크를 실행하세요.", file=sys.stderr)
-        return
-
-    recent = history[-MAX_HISTORY:]
-    latest = recent[-1]
-    doc_info = next((t for t in list_document_types() if t.type_id == doc_type), None)
-    doc_name = doc_info.display_name if doc_info else doc_type
-
-    lines = [
-        f"# PDF Parser Benchmark Report — {doc_name}",
-        "",
-        f"> Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        "",
-        "## Latest",
-        "",
-        f"- **Document Type**: {doc_name} (`{doc_type}`)",
-        f"- **Version**: v{latest['version']}",
-        f"- **Date**: {latest['date']}",
-        f"- **Overall**: **{latest['overall']}**/100",
-        f"- 표제부: {_score_str(latest.get('title'))} | "
-        f"갑구: {_score_str(latest.get('section_a'))} | "
-        f"을구: {_score_str(latest.get('section_b'))}",
-        "",
-    ]
-
-    if len(recent) >= 2:
-        lines += [
-            "## Version History", "",
-            "```mermaid", "xychart-beta",
-            '  title "Overall Score by Version"',
-            "  x-axis [{}]".format(", ".join(f'"v{h["version"]}"' for h in recent)),
-            '  y-axis "Score" 0 --> 100',
-            "  bar [{}]".format(", ".join(str(h["overall"]) for h in recent)),
-            "```", "",
-        ]
-
-    lines += [
-        "## Score Table", "",
-        "| Version | Date | Overall | 표제부 | 갑구 | 을구 | Files |",
-        "|---------|------|---------|--------|------|------|-------|",
-    ]
-    for h in reversed(recent):
-        lines.append(
-            f"| v{h['version']} | {h['date']} | "
-            f"**{h['overall']}** | {_score_str(h.get('title'))} | "
-            f"{_score_str(h.get('section_a'))} | {_score_str(h.get('section_b'))} | "
-            f"{h['files']} |"
-        )
-    lines.append("")
-
-    lines += [
-        "## File Details (Latest)", "",
-        "| File | Type | Score | 표제부 | 갑구 | 을구 | Tokens |",
-        "|------|------|-------|--------|------|------|--------|",
-    ]
-    for d in latest.get("details", []):
-        lines.append(
-            f"| {d['file']} | {d['type']} | **{d['score']}** | "
-            f"{_score_str(d.get('title'))} | {_score_str(d.get('section_a'))} | "
-            f"{_score_str(d.get('section_b'))} | "
-            f"{d.get('parser_tokens', 0)}/{d.get('gt_tokens', 0)} |"
-        )
-    lines.append("")
-
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    print(f"  Report: {out}")
 
 
 # ==================== CLI ====================
@@ -509,7 +482,6 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true", help="누락 토큰 상세")
     ap.add_argument("--json", action="store_true", help="JSON 출력")
     ap.add_argument("--save", "-s", action="store_true", help="히스토리 저장")
-    ap.add_argument("--report", "-r", action="store_true", help="Markdown 리포트 생성")
     ap.add_argument("--type", "-t", default="registry", help="문서 타입 (기본: registry)")
     ap.add_argument("--parser", "-p", default="latest", help="파서 버전 (기본: latest)")
     ap.add_argument("--all-parsers", action="store_true", help="전 버전 순차 비교")
@@ -526,11 +498,6 @@ def main():
             print(f"  {dt.type_id} ({dt.display_name}): {ver_str}")
             if dt.sub_types:
                 print(f"    sub-types: {', '.join(dt.sub_types)}")
-        return
-
-    # --report
-    if args.report:
-        generate_report_md(doc_type=args.type)
         return
 
     # PDF 수집
@@ -553,8 +520,6 @@ def main():
             print_report(report, verbose=args.verbose)
             if args.save:
                 save_to_json(report)
-        if args.save:
-            generate_report_md(doc_type=args.type)
         return
 
     # 단일 실행
@@ -568,7 +533,6 @@ def main():
 
     if args.save:
         save_to_json(report)
-        generate_report_md(doc_type=args.type)
 
 
 if __name__ == "__main__":

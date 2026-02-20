@@ -64,3 +64,9 @@ download/
 
 # local sqlite/db artifacts
 db/*.db
+
+# benchmark detail files (full parse outputs, large, regenerable)
+backend/benchmarks/
+
+# pdf inspect reports (generated, large)
+backend/inspect/

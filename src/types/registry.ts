@@ -38,12 +38,16 @@ export interface SectionAEntry {
   receiptNumber: string; // 접수번호
   registrationCause: string; // 등기원인
   registrationCauseDate?: string; // 등기원인일자
-  owner?: OwnerInfo; // 소유자 정보
+  owners: OwnerInfo[]; // 소유자 목록 (단독: 1명, 공유: N명)
   creditor?: CreditorInfo; // 채권자 정보 (경매, 가압류 등)
   claimAmount?: number; // 청구금액 (가압류)
   restriction?: string; // 금지사항
   isCancelled?: boolean; // 말소 여부
-  cancellationInfo?: string; // 말소 정보
+  cancelledByRank?: string; // [수동] 이 항목을 말소시킨 순위번호
+  cancellationDate?: string; // 말소일자
+  cancellationCause?: string; // 말소원인
+  cancelsRank?: string; // [능동] 이 항목이 말소하는 대상 순위번호
+  remarks?: string; // 기타사항 (법조문 등)
 }
 
 export interface OwnerInfo {

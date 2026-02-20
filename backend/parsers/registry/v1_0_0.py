@@ -130,16 +130,12 @@ class SectionAEntry:
     claim_amount: Optional[int] = None
     # 말소 관련
     is_cancelled: bool = False
-    cancellation_rank_number: Optional[str] = None
+    cancelled_by_rank: Optional[str] = None
     cancellation_date: Optional[str] = None
     cancellation_cause: Optional[str] = None
-    cancels_rank_number: Optional[str] = None
+    cancels_rank: Optional[str] = None
     raw_text: str = ""
 
-    # 하위호환
-    @property
-    def owner(self) -> Optional[OwnerInfo]:
-        return self.owners[0] if self.owners else None
 
 
 @dataclass
@@ -170,10 +166,10 @@ class SectionBEntry:
     bond_amount: Optional[int] = None
     # 말소 관련
     is_cancelled: bool = False
-    cancellation_rank_number: Optional[str] = None
+    cancelled_by_rank: Optional[str] = None
     cancellation_date: Optional[str] = None
     cancellation_cause: Optional[str] = None
-    cancels_rank_number: Optional[str] = None
+    cancels_rank: Optional[str] = None
     raw_text: str = ""
 
 
@@ -683,7 +679,7 @@ class RegistryPDFParser:
             # 말소 등기 대상 번호
             cancels_match = re.search(r'(\d+(?:-\d+)?)번', purpose)
             if '말소' in purpose and cancels_match:
-                entry.cancels_rank_number = cancels_match[1]
+                entry.cancels_rank = cancels_match[1]
 
             entries.append(entry)
 
@@ -739,7 +735,7 @@ class RegistryPDFParser:
             # 말소 대상
             cancels_match = re.search(r'(\d+(?:-\d+)?)번', purpose)
             if '말소' in purpose and cancels_match:
-                entry.cancels_rank_number = cancels_match[1]
+                entry.cancels_rank = cancels_match[1]
 
             entries.append(entry)
 
@@ -1087,24 +1083,24 @@ class RegistryPDFParser:
             # "X번~말소" 등기는 그 자체가 말소 등기
             if '말소' in reg_type:
                 cancels_match = re.search(r'(\d+(?:-\d+)?)번', reg_type)
-                if cancels_match and not entry.cancels_rank_number:
-                    entry.cancels_rank_number = cancels_match[1]
+                if cancels_match and not entry.cancels_rank:
+                    entry.cancels_rank = cancels_match[1]
 
             # 등기원인이 해지/해제/취하/취소 → 말소 처리
             cause = entry.registration_cause or ""
             if cause in ('해지', '해제', '취하', '취소결정', '압류해제'):
-                if not entry.cancels_rank_number:
+                if not entry.cancels_rank:
                     cancels_match = re.search(r'(\d+(?:-\d+)?)번', reg_type)
                     if cancels_match:
-                        entry.cancels_rank_number = cancels_match[1]
+                        entry.cancels_rank = cancels_match[1]
 
     def _map_cancellations(self, entries: List):
         """말소 관계 매핑: 말소등기 → 원본등기"""
         cancel_map: Dict[str, Dict] = {}
 
         for entry in entries:
-            if entry.cancels_rank_number:
-                cancel_map[entry.cancels_rank_number] = {
+            if entry.cancels_rank:
+                cancel_map[entry.cancels_rank] = {
                     'rank_number': entry.rank_number,
                     'date': entry.receipt_date,
                     'cause': entry.registration_cause or entry.cancellation_cause,
@@ -1114,7 +1110,7 @@ class RegistryPDFParser:
             if entry.rank_number in cancel_map:
                 info = cancel_map[entry.rank_number]
                 entry.is_cancelled = True
-                entry.cancellation_rank_number = info['rank_number']
+                entry.cancelled_by_rank = info['rank_number']
                 entry.cancellation_date = info['date']
                 entry.cancellation_cause = info['cause']
 
@@ -1131,12 +1127,6 @@ def parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]:
     data.parser_version = PARSER_VERSION
 
     result = to_dict(data)
-
-    # 하위호환: owner 필드 (첫 번째 소유자)
-    for entry in result.get('section_a', []):
-        owners = entry.pop('owners', [])
-        entry['owner'] = owners[0] if owners else None
-        entry['owners'] = owners
 
     # 통계 추가
     result['section_a_count'] = len(result.get('section_a', []))

@@ -30,7 +30,7 @@ def format_entry_a(e: dict) -> str:
     amt = f" 금{e['claim_amount']:,}원" if e.get("claim_amount") else ""
     shares = [f'{o["name"]}({o["share"]})' for o in e.get("owners", []) if o.get("share")]
     share_str = f" [{', '.join(shares)}]" if shares else ""
-    cancel = f"\n         → {e['cancels_rank_number']}번 말소" if e.get("cancels_rank_number") else ""
+    cancel = f"\n         → {e['cancels_rank']}번 말소" if e.get("cancels_rank") else ""
     return (f"  {e['rank_number']:>6} | {e['registration_type']:<22} "
             f"| {e['receipt_date']:<15} | {person}{amt}{share_str}{c}{cancel}")
 
@@ -44,7 +44,7 @@ def format_entry_b(e: dict) -> str:
     elif e.get("deposit_amount"):
         amt = f" 보증금 금{e['deposit_amount']:,}원"
     purpose = f"\n         목적: {e['purpose']}" if e.get("purpose") else ""
-    cancel = f"\n         → {e['cancels_rank_number']}번 말소" if e.get("cancels_rank_number") else ""
+    cancel = f"\n         → {e['cancels_rank']}번 말소" if e.get("cancels_rank") else ""
     return (f"  {e['rank_number']:>6} | {e['registration_type']:<22} "
             f"| {e['receipt_date']:<15} | {m}{amt}{c}{purpose}{cancel}")
 

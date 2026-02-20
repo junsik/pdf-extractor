@@ -492,7 +492,7 @@ export default function DashboardPage() {
                                         <div className="space-y-1">
                                           <Badge variant="destructive">말소됨</Badge>
                                           <p className="text-xs text-muted-foreground">
-                                            {entry.cancellation_rank_number}번에서 말소
+                                            {entry.cancelled_by_rank}번에서 말소
                                           </p>
                                         </div>
                                       ) : (

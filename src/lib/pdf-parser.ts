@@ -419,11 +419,12 @@ export function maskForDemo(data: RegistryData): Partial<RegistryData> {
     },
     sectionA: data.sectionA.slice(0, 1).map(entry => ({
       ...entry,
-      owner: entry.owner ? {
-        name: entry.owner.name.charAt(0) + '*' + entry.owner.name.slice(-1),
-        residentNumber: entry.owner.residentNumber ? '******-*******' : undefined,
-        address: entry.owner.address ? entry.owner.address.substring(0, 10) + '...' : undefined,
-      } : undefined,
+      owners: (entry.owners ?? []).map(o => ({
+        ...o,
+        name: o.name.charAt(0) + '*' + o.name.slice(-1),
+        residentNumber: o.residentNumber ? '******-*******' : undefined,
+        address: o.address ? o.address.substring(0, 10) + '...' : undefined,
+      })),
     })),
     sectionB: data.sectionB.slice(0, 1).map(entry => ({
       rankNumber: entry.rankNumber,

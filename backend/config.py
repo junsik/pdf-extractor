@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list = [
         "http://localhost:3009",
         "http://127.0.0.1:3009",
-        "https://registry-parser.com"
+        "https://pdf.svc.imprun.dev"
     ]
     
     # 로깅 설정

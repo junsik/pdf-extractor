@@ -65,6 +65,29 @@ class CancellationDetector:
 
         return False
 
+    def is_row_cancelled_range(self, page_index: int, y_top: float, y_bot: float) -> bool:
+        """행의 y 범위(top~bottom) 전체를 검사하여 말소 영역 겹침 확인.
+
+        테이블 행이 여러 줄로 구성된 경우, 붉은 글자가 행 하단에만 있어도
+        is_row_cancelled(y_top)에서 놓칠 수 있다. 행 전체 높이로 검사한다.
+        """
+        top = round(y_top, 0)
+        bot = round(y_bot, 0)
+
+        # 붉은 선 범위가 행과 겹치는지
+        ranges = self._cancelled_y_ranges.get(page_index, [])
+        for y_min, y_max in ranges:
+            if y_min <= bot and y_max >= top:
+                return True
+
+        # 붉은 글자가 행 y 범위 내에 있는지
+        char_ys = self._cancelled_char_ys.get(page_index, set())
+        for cy in char_ys:
+            if top <= cy <= bot:
+                return True
+
+        return False
+
     def is_table_row_cancelled(self, page_index: int, row_cells_y: List[float]) -> bool:
         """테이블 행의 셀들 y좌표로 말소 여부 판단"""
         if not row_cells_y:

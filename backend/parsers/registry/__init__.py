@@ -5,5 +5,6 @@
 토지 / 건물 / 집합건물 3가지 타입을 내부적으로 자동 감지하여 처리한다.
 """
 from parsers.registry.v1_0_0 import RegistryParserV1
+from parsers.registry.v1_0_1 import RegistryParserV1_0_1
 
-PARSER_CLASSES = [RegistryParserV1]
+PARSER_CLASSES = [RegistryParserV1, RegistryParserV1_0_1]
