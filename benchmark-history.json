@@ -1,0 +1,113 @@
+[
+  {
+    "version": "1.0.0",
+    "date": "2026-02-20 12:15",
+    "files": 10,
+    "overall": 58.4,
+    "title": 59.5,
+    "section_a": 59.2,
+    "section_b": 51.9,
+    "details": [
+      {
+        "file": "1184441_2_16421996070005.pdf",
+        "type": "land",
+        "score": 52.1,
+        "title": 62.5,
+        "section_a": 44.4,
+        "section_b": 68.0,
+        "gt_tokens": 211,
+        "parser_tokens": 110
+      },
+      {
+        "file": "1484015_18412010002706.pdf",
+        "type": "aggregate_building",
+        "score": 66.1,
+        "title": 97.1,
+        "section_a": 53.0,
+        "section_b": 49.6,
+        "gt_tokens": 1137,
+        "parser_tokens": 751
+      },
+      {
+        "file": "1490914_11012022005962.pdf",
+        "type": "building",
+        "score": 71.6,
+        "title": 18.8,
+        "section_a": 76.4,
+        "section_b": 73.4,
+        "gt_tokens": 986,
+        "parser_tokens": 706
+      },
+      {
+        "file": "1509150_13452003020551.pdf",
+        "type": "aggregate_building",
+        "score": 65.5,
+        "title": 92.8,
+        "section_a": 46.4,
+        "section_b": 48.3,
+        "gt_tokens": 893,
+        "parser_tokens": 585
+      },
+      {
+        "file": "1543339_23421996324098.pdf",
+        "type": "aggregate_building",
+        "score": 75.5,
+        "title": 93.1,
+        "section_a": 80.1,
+        "section_b": 60.5,
+        "gt_tokens": 929,
+        "parser_tokens": 701
+      },
+      {
+        "file": "1575693_13501996047446.pdf",
+        "type": "land",
+        "score": 47.3,
+        "title": 50.0,
+        "section_a": 50.5,
+        "section_b": 36.2,
+        "gt_tokens": 535,
+        "parser_tokens": 253
+      },
+      {
+        "file": "2024타경4849_1.pdf",
+        "type": "building",
+        "score": 49.8,
+        "title": 11.8,
+        "section_a": 62.1,
+        "section_b": 48.7,
+        "gt_tokens": 831,
+        "parser_tokens": 414
+      },
+      {
+        "file": "24타경285_1.pdf",
+        "type": "land",
+        "score": 59.0,
+        "title": 41.7,
+        "section_a": 50.8,
+        "section_b": 69.2,
+        "gt_tokens": 239,
+        "parser_tokens": 141
+      },
+      {
+        "file": "24타경564_3.pdf",
+        "type": "aggregate_building",
+        "score": 48.4,
+        "title": 76.2,
+        "section_a": 58.8,
+        "section_b": 23.0,
+        "gt_tokens": 376,
+        "parser_tokens": 182
+      },
+      {
+        "file": "24타경8678_1.pdf",
+        "type": "land",
+        "score": 48.5,
+        "title": 51.0,
+        "section_a": 69.1,
+        "section_b": 42.1,
+        "gt_tokens": 363,
+        "parser_tokens": 176
+      }
+    ]
+  }
+]
