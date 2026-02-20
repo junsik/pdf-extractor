@@ -1,5 +1,8 @@
 """
 데이터베이스 연결 및 세션 관리
+
+기존 backend/database.py와 동일한 내용.
+새 import 경로: from infrastructure.persistence.database import Base, get_session
 """
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -12,7 +15,6 @@ from config import settings
 os.makedirs("./uploads", exist_ok=True)
 os.makedirs("./logs", exist_ok=True)
 
-# 비동기 엔진 생성
 engine = create_async_engine(
     settings.DB_URL,
     echo=settings.DEBUG,
@@ -21,7 +23,6 @@ engine = create_async_engine(
     max_overflow=10,
 )
 
-# 비동기 세션 팩토리
 async_session_factory = async_sessionmaker(
     engine,
     class_=AsyncSession,
@@ -30,7 +31,6 @@ async_session_factory = async_sessionmaker(
     autoflush=False
 )
 
-# 베이스 클래스
 Base = declarative_base()
 
 

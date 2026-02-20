@@ -1,5 +1,5 @@
 """
-등기부등본 PDF 파싱 엔진 v2
+등기부등본 PDF 파싱 엔진 v1.0.0
 - pdfplumber 테이블 기반 추출 (텍스트 + 구조 동시 파싱)
 - 붉은 선/글자 기반 말소사항 감지
 - 페이지 간 테이블 연결
@@ -7,12 +7,20 @@
 """
 import re
 import io
-import json
-from typing import List, Optional, Dict, Any, Tuple, Set
+import copy
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from loguru import logger
 import pdfplumber
+
+from parsers.base import BaseParser, DocumentTypeInfo, ParseResult
+from parsers.common.pdf_utils import filter_watermark, clean_text, clean_cell, WATERMARK_RE
+from parsers.common.text_utils import (
+    parse_amount, parse_date_korean, extract_receipt_info,
+    parse_resident_number, to_dict,
+)
+from parsers.common.cancellation import CancellationDetector
 
 
 # ==================== 데이터 클래스 ====================
@@ -211,225 +219,10 @@ class RegistryData:
     errors: List[str] = field(default_factory=list)
 
 
-# ==================== 유틸리티 함수 ====================
-
-_WATERMARK_RE = re.compile(r'열\s*람\s*용')
-
-
-def _is_watermark_char(obj: dict) -> bool:
-    """pdfplumber 문자 객체가 워터마크인지 판별 (회색 색상 기반)"""
-    if obj.get('object_type') != 'char':
-        return False
-    color = obj.get('non_stroking_color')
-    if isinstance(color, (tuple, list)) and len(color) >= 3:
-        return all(0.5 < c < 1.0 for c in color[:3])
-    return False
-
-
-def _filter_watermark(page):
-    """페이지에서 워터마크 문자를 제거한 필터링된 페이지 반환"""
-    return page.filter(lambda obj: not _is_watermark_char(obj))
-
-
-def _clean_text(text: Optional[str]) -> str:
-    """텍스트 정리 (공백 정규화)"""
-    if not text:
-        return ""
-    text = _WATERMARK_RE.sub('', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-
-def _clean_cell(cell: Optional[str]) -> str:
-    """테이블 셀 정리"""
-    if not cell:
-        return ""
-    return cell.strip()
-
-
-def parse_amount(text: str) -> Optional[int]:
-    """금액 문자열을 숫자로 변환 (원정 변형 포함)"""
-    if not text:
-        return None
-    match = re.search(r'금\s*([\d,]+)\s*원정?', text)
-    if match:
-        return int(match[1].replace(',', ''))
-    return None
-
-
-def parse_date_korean(text: str) -> Optional[str]:
-    """한국어 날짜 형식 파싱 (YYYY년MM월DD일, YYYY.MM.DD, YYYY-MM-DD)"""
-    if not text:
-        return None
-    # 한국어 형식
-    match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', text)
-    if match:
-        return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
-    # 점 구분 형식 (2025.01.03)
-    match = re.search(r'(\d{4})\.(\d{1,2})\.(\d{1,2})', text)
-    if match:
-        return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
-    # ISO 형식 (2025-01-03)
-    match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', text)
-    if match:
-        return f"{match[1]}년 {match[2].zfill(2)}월 {match[3].zfill(2)}일"
-    return None
-
-
-def extract_receipt_info(text: str) -> Tuple[str, str]:
-    """접수일자와 접수번호 추출 (셀 텍스트에서)"""
-    date_str = ""
-    number_str = ""
-    # 한국어 형식 우선
-    date_match = re.search(r'(\d{4}년\s*\d{1,2}월\s*\d{1,2}일)', text)
-    if date_match:
-        date_str = date_match[1]
-    else:
-        # 점 구분 형식 (2025.01.03)
-        date_match = re.search(r'(\d{4}\.\d{1,2}\.\d{1,2})', text)
-        if date_match:
-            date_str = date_match[1]
-        else:
-            # ISO 형식 (2025-01-03)
-            date_match = re.search(r'(\d{4}-\d{1,2}-\d{1,2})', text)
-            if date_match:
-                date_str = date_match[1]
-    number_match = re.search(r'제?\s*([\d]+호)', text)
-    if number_match:
-        number_str = number_match[1]
-    return date_str, number_str
-
-
-def parse_resident_number(text: str) -> Optional[str]:
-    """주민등록번호/법인번호 추출 (*, ○ 마스킹 대응)"""
-    # 개인: 6자리-7자리(마스킹 포함: *, ○, ● 등)
-    match = re.search(r'(\d{6})-([*○●]{7}|\d{7}|\d{1,6}[*○●]+)', text)
-    if match:
-        return f"{match[1]}-{match[2]}"
-    # 법인: 6자리-7자리
-    match = re.search(r'(\d{6})-(\d{7})', text)
-    if match:
-        return f"{match[1]}-{match[2]}"
-    # 법인: 000-00-00000
-    match = re.search(r'(\d{3}-\d{2}-\d{5})', text)
-    if match:
-        return match[1]
-    return None
-
-
-# ==================== 붉은 선 감지 ====================
-
-class CancellationDetector:
-    """페이지별 붉은 선/글자 기반 말소 감지"""
-
-    def __init__(self):
-        # page_index -> set of y-coordinate ranges that are cancelled
-        self._cancelled_y_ranges: Dict[int, List[Tuple[float, float]]] = {}
-        # page_index -> set of cancelled char y-coords
-        self._cancelled_char_ys: Dict[int, Set[float]] = {}
-
-    def analyze_page(self, page, page_index: int):
-        """페이지의 붉은 선, 붉은 사각형, 붉은 글자 분석"""
-        # 붉은 선 수집
-        red_line_ys = set()
-        for line in (page.lines or []):
-            color = line.get('stroking_color')
-            if self._is_red(color):
-                y = round(line['top'], 0)
-                red_line_ys.add(y)
-
-        # 붉은 사각형(박스형 말소 표시) 수집
-        for rect in (page.rects or []):
-            color = rect.get('stroking_color') or rect.get('non_stroking_color')
-            if self._is_red(color):
-                top = round(rect['top'], 0)
-                bottom = round(rect['bottom'], 0)
-                # 사각형의 전체 높이 범위를 말소 영역으로 등록
-                for y in range(int(top), int(bottom) + 1):
-                    red_line_ys.add(float(y))
-
-        if red_line_ys:
-            ranges = []
-            for y in sorted(red_line_ys):
-                ranges.append((y - 6, y + 6))  # 선 위아래 6pt 범위
-            self._cancelled_y_ranges[page_index] = self._merge_ranges(ranges)
-
-        # 붉은 글자 y좌표 수집
-        red_char_ys = set()
-        for ch in (page.chars or []):
-            sc = ch.get('stroking_color')
-            nsc = ch.get('non_stroking_color')
-            if self._is_red(sc) or self._is_red(nsc):
-                red_char_ys.add(round(ch['top'], 0))
-        if red_char_ys:
-            self._cancelled_char_ys[page_index] = red_char_ys
-
-    def is_row_cancelled(self, page_index: int, row_y: float) -> bool:
-        """해당 페이지의 y좌표가 말소 영역인지 확인"""
-        y = round(row_y, 0)
-
-        # 붉은 선 범위 체크
-        ranges = self._cancelled_y_ranges.get(page_index, [])
-        for y_min, y_max in ranges:
-            if y_min <= y <= y_max:
-                return True
-
-        # 붉은 글자 y좌표 체크
-        char_ys = self._cancelled_char_ys.get(page_index, set())
-        for cy in char_ys:
-            if abs(cy - y) <= 6:
-                return True
-
-        return False
-
-    def is_table_row_cancelled(self, page_index: int, row_cells_y: List[float]) -> bool:
-        """테이블 행의 셀들 y좌표로 말소 여부 판단"""
-        if not row_cells_y:
-            return False
-        # 셀 y좌표 중 하나라도 말소 영역에 있으면 말소
-        for y in row_cells_y:
-            if self.is_row_cancelled(page_index, y):
-                return True
-        return False
-
-    @staticmethod
-    def _is_red(color) -> bool:
-        if not color:
-            return False
-        if isinstance(color, (list, tuple)):
-            if len(color) >= 3:
-                r, g, b = color[0], color[1], color[2]
-                if isinstance(r, (int, float)):
-                    # RGB 0-1 스케일
-                    if r > 0.7 and g < 0.3 and b < 0.3:
-                        return True
-                    # RGB 0-255 스케일
-                    if r > 180 and g < 80 and b < 80:
-                        return True
-            elif len(color) == 4:
-                c, m, y_val, k = color
-                if m > 0.5 and y_val > 0.3 and c < 0.2:
-                    return True
-        return False
-
-    @staticmethod
-    def _merge_ranges(ranges: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        if not ranges:
-            return []
-        sorted_ranges = sorted(ranges)
-        merged = [sorted_ranges[0]]
-        for start, end in sorted_ranges[1:]:
-            if start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        return merged
-
-
 # ==================== 메인 파싱 클래스 ====================
 
 class RegistryPDFParser:
-    """등기부등본 PDF 파서 v2"""
+    """등기부등본 PDF 파서"""
 
     # 섹션 감지 패턴
     SECTION_PATTERNS = {
@@ -478,7 +271,7 @@ class RegistryPDFParser:
                 self.cancellation_detector.analyze_page(page, pi)
 
                 # 워터마크 제거된 페이지
-                clean_page = _filter_watermark(page)
+                clean_page = filter_watermark(page)
 
                 # 텍스트 추출
                 text = clean_page.extract_text() or ""
@@ -511,7 +304,7 @@ class RegistryPDFParser:
                             row_y = row_ys[ri] if ri < len(row_ys) else 0.0
                             is_cancelled = self.cancellation_detector.is_row_cancelled(pi, row_y)
                             all_tables_by_section[current_section].append({
-                                'cells': [_clean_cell(c) for c in row],
+                                'cells': [clean_cell(c) for c in row],
                                 'page': pi,
                                 'row_y': row_y,
                                 'is_cancelled': is_cancelled,
@@ -602,14 +395,14 @@ class RegistryPDFParser:
         match = re.search(pattern, self.normalized_text)
         if match:
             addr = match[1].strip()
-            addr = _WATERMARK_RE.sub('', addr).strip()
+            addr = WATERMARK_RE.sub('', addr).strip()
             return addr
         return ""
 
     # ==================== 섹션 감지 ====================
 
     def _detect_section(self, text: str) -> Optional[str]:
-        text_clean = _clean_text(text)
+        text_clean = clean_text(text)
         for key, pattern in self.SECTION_PATTERNS.items():
             if pattern.search(text_clean):
                 # _skip 접두사: 공동담보목록 등 → 현재 섹션 리셋 (None 반환)
@@ -641,7 +434,7 @@ class RegistryPDFParser:
             self.normalized_text
         )
         if road_match:
-            info.road_address = _clean_text(road_match[1])
+            info.road_address = clean_text(road_match[1])
 
         # 건물종류 (토지는 건물종류 없음)
         if property_type != 'land':
@@ -684,7 +477,7 @@ class RegistryPDFParser:
             info.land_entries.append(entry)
 
             # 지목, 면적 추출 (최신 항목으로 갱신)
-            cleaned_type = _clean_text(cells[3])
+            cleaned_type = clean_text(cells[3])
             if cleaned_type:
                 info.land_type = cleaned_type
             area_match = re.search(r'([\d,.]+)\s*㎡', cells[4] or '')
@@ -785,7 +578,7 @@ class RegistryPDFParser:
 
     def _extract_building_details(self, info: TitleInfo, detail_text: str):
         """건물 상세정보 추출 (구조, 지붕, 층수, 면적)"""
-        text = _clean_text(detail_text)
+        text = clean_text(detail_text)
 
         # 구조
         structure_match = re.search(
@@ -847,22 +640,22 @@ class RegistryPDFParser:
             if len(cells) < 5:
                 continue
 
-            rank = _clean_text(cells[0])
+            rank = clean_text(cells[0])
             if not rank or not re.match(r'\d', rank):
                 continue
 
             # 공동담보목록/매각물건목록/요약 행 필터링
             if '목록번호' in rank or '거래가액' in rank:
-                break  # 이후 행은 모두 목록 데이터
+                break
             if '등기명의인' in rank:
-                break  # 주요 등기사항 요약 섹션
-            purpose = _clean_text(cells[1])
+                break
+            purpose = clean_text(cells[1])
             if re.match(r'\[(?:토지|건물)\]', purpose):
-                continue  # 공동담보목록 항목
+                continue
 
-            receipt_text = _clean_text(cells[2])
-            cause_text = _clean_text(cells[3])
-            detail_text = _clean_text(cells[4])
+            receipt_text = clean_text(cells[2])
+            cause_text = clean_text(cells[3])
+            detail_text = clean_text(cells[4])
             raw = f"{purpose} {receipt_text} {cause_text} {detail_text}"
 
             # 등기목적
@@ -907,22 +700,22 @@ class RegistryPDFParser:
             if len(cells) < 5:
                 continue
 
-            rank = _clean_text(cells[0])
+            rank = clean_text(cells[0])
             if not rank or not re.match(r'\d', rank):
                 continue
 
             # 공동담보목록/매각물건목록/요약 행 필터링
             if '목록번호' in rank or '거래가액' in rank:
-                break  # 이후 행은 모두 목록 데이터
+                break
             if '등기명의인' in rank:
-                break  # 주요 등기사항 요약 섹션
-            purpose = _clean_text(cells[1])
+                break
+            purpose = clean_text(cells[1])
             if re.match(r'\[(?:토지|건물)\]', purpose):
-                continue  # 공동담보목록 항목
+                continue
 
-            receipt_text = _clean_text(cells[2])
-            cause_text = _clean_text(cells[3])
-            detail_text = _clean_text(cells[4])
+            receipt_text = clean_text(cells[2])
+            cause_text = clean_text(cells[3])
+            detail_text = clean_text(cells[4])
             raw = f"{purpose} {receipt_text} {cause_text} {detail_text}"
 
             reg_type = self._classify_reg_type_b(purpose)
@@ -955,7 +748,7 @@ class RegistryPDFParser:
     # ==================== 등기유형 분류 ====================
 
     def _classify_reg_type_a(self, text: str) -> str:
-        text = _clean_text(text)
+        text = clean_text(text)
         # 말소 패턴 우선
         if '말소' in text:
             m = re.search(r'(\d+(?:-\d+)?번?\S*말소)', text)
@@ -972,7 +765,7 @@ class RegistryPDFParser:
         return text[:40] if len(text) > 40 else text
 
     def _classify_reg_type_b(self, text: str) -> str:
-        text = _clean_text(text)
+        text = clean_text(text)
         if '말소' in text:
             m = re.search(r'(\d+(?:-\d+)?번?\S*말소)', text)
             return m[1] if m else text
@@ -992,7 +785,7 @@ class RegistryPDFParser:
 
     def _extract_cause(self, text: str) -> str:
         """등기원인 추출"""
-        text = _clean_text(text)
+        text = clean_text(text)
         causes = [
             '매매', '상속', '증여', '신탁', '경락', '판결', '교환',
             '협의분할', '법원경매', '공매', '설정계약', '매매예약',
@@ -1105,7 +898,7 @@ class RegistryPDFParser:
         # 피보전권리
         right_match = re.search(r'피보전권리\s+(.+?)(?:채권자|금지|$)', full)
         if right_match and not entry.registration_cause:
-            entry.registration_cause = _clean_text(right_match[1])
+            entry.registration_cause = clean_text(right_match[1])
 
     # ==================== 을구 상세 ====================
 
@@ -1187,13 +980,13 @@ class RegistryPDFParser:
         # 지상권 정보
         purpose_match = re.search(r'목\s*적\s+(.+?)(?:범\s*위|존속|지\s*료|$)', full)
         if purpose_match:
-            entry.purpose = _clean_text(purpose_match[1])
+            entry.purpose = clean_text(purpose_match[1])
         scope_match = re.search(r'범\s*위\s+(.+?)(?:존속|지\s*료|지상권자|$)', full)
         if scope_match:
-            entry.scope = _clean_text(scope_match[1])
+            entry.scope = clean_text(scope_match[1])
         duration_match = re.search(r'존속기간\s+(.+?)(?:지\s*료|지상권자|$)', full)
         if duration_match:
-            entry.duration = _clean_text(duration_match[1])
+            entry.duration = clean_text(duration_match[1])
         rent_match = re.search(r'지\s*료\s+(\S+)', full)
         if rent_match:
             entry.land_rent = rent_match[1]
@@ -1219,11 +1012,11 @@ class RegistryPDFParser:
             remaining
         )
         if addr_match:
-            return _clean_text(addr_match[1])
+            return clean_text(addr_match[1])
         # 군/구 시작 패턴
         addr_match2 = re.search(r'(\S+[군구시읍면동리]\s+\S+(?:\s+\S+){0,6})', remaining)
         if addr_match2:
-            return _clean_text(addr_match2[1])
+            return clean_text(addr_match2[1])
         return None
 
     @staticmethod
@@ -1244,7 +1037,7 @@ class RegistryPDFParser:
         for row_data in rows:
             cells = row_data['cells']
             first_cell = ' '.join(str(c) for c in cells[:2] if c)
-            first_cell_clean = _clean_text(first_cell)
+            first_cell_clean = clean_text(first_cell)
             # 섹션 제목 행 (【 】 포함)
             if '【' in first_cell or '】' in first_cell:
                 continue
@@ -1263,7 +1056,7 @@ class RegistryPDFParser:
         merged = []
         for row_data in rows:
             cells = row_data['cells']
-            rank = _clean_text(cells[0]) if cells else ""
+            rank = clean_text(cells[0]) if cells else ""
 
             # 순위번호가 있으면 새 항목
             if rank and re.match(r'\d', rank):
@@ -1326,18 +1119,18 @@ class RegistryPDFParser:
                 entry.cancellation_cause = info['cause']
 
 
-# ==================== 외부 인터페이스 ====================
+# ==================== 레거시 외부 인터페이스 ====================
 
 PARSER_VERSION = "1.0.0"
 
 
 def parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]:
-    """PDF 파싱 실행 (외부 인터페이스)"""
+    """PDF 파싱 실행 (레거시 인터페이스)"""
     parser = RegistryPDFParser(pdf_buffer)
     data = parser.parse()
     data.parser_version = PARSER_VERSION
 
-    result = _to_dict(data)
+    result = to_dict(data)
 
     # 하위호환: owner 필드 (첫 번째 소유자)
     for entry in result.get('section_a', []):
@@ -1358,53 +1151,85 @@ def parse_registry_pdf(pdf_buffer: bytes) -> Dict[str, Any]:
     return result
 
 
-def _to_dict(obj):
-    """데이터클래스를 딕셔너리로 변환"""
-    if hasattr(obj, '__dataclass_fields__'):
-        d = {}
-        for k in obj.__dataclass_fields__:
-            val = getattr(obj, k)
-            d[k] = _to_dict(val)
-        return d
-    elif isinstance(obj, list):
-        return [_to_dict(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {k: _to_dict(v) for k, v in obj.items()}
-    else:
-        return obj
+# ==================== BaseParser 플러그인 래퍼 ====================
 
+class RegistryParserV1(BaseParser):
+    """등기부등본 파서 v1.0.0 — BaseParser 플러그인 인터페이스"""
 
-def mask_for_demo(data: Dict[str, Any]) -> Dict[str, Any]:
-    """데모 버전용 데이터 마스킹"""
-    import copy
-    masked = copy.deepcopy(data)
+    @classmethod
+    def document_type_info(cls) -> DocumentTypeInfo:
+        return DocumentTypeInfo(
+            type_id="registry",
+            display_name="등기부등본",
+            description="부동산 등기부등본 (토지, 건물, 집합건물)",
+            sub_types=["land", "building", "aggregate_building"],
+        )
 
-    # 표제부 면적은 첫 층만
-    if 'title_info' in masked and 'areas' in masked['title_info']:
-        masked['title_info']['areas'] = masked['title_info']['areas'][:1]
+    @classmethod
+    def parser_version(cls) -> str:
+        return "1.0.0"
 
-    # 갑구 첫 항목만, 개인정보 마스킹
-    if 'section_a' in masked and masked['section_a']:
-        first_entry = masked['section_a'][0]
-        if first_entry.get('owner'):
-            owner = first_entry['owner']
-            if owner.get('name'):
-                name = owner['name']
-                owner['name'] = (
-                    name[0] + '*' * (len(name) - 2) + name[-1]
-                    if len(name) > 2 else name[0] + '*'
-                )
-            owner['resident_number'] = '******-*******'
-            owner['address'] = '***' if owner.get('address') else None
-        masked['section_a'] = [first_entry]
+    @classmethod
+    def can_parse(cls, pdf_buffer: bytes, text_sample: str) -> float:
+        """등기부등본 PDF인지 판별"""
+        score = 0.0
+        indicators = [
+            ('고유번호', 0.3),
+            ('표제부', 0.2),
+            ('갑구', 0.2),
+            ('을구', 0.1),
+            ('등기부등본', 0.15),
+            ('[토지]', 0.05), ('[건물]', 0.05), ('[집합건물]', 0.05),
+        ]
+        for keyword, weight in indicators:
+            if keyword in text_sample:
+                score += weight
+        return min(score, 1.0)
 
-    # 을구 첫 항목만, 금액 숨김
-    if 'section_b' in masked and masked['section_b']:
-        first_entry = masked['section_b'][0]
-        first_entry['max_claim_amount'] = None
-        first_entry['deposit_amount'] = None
-        first_entry['mortgagee'] = None
-        first_entry['lessee'] = None
-        masked['section_b'] = [first_entry]
+    def parse(self, pdf_buffer: bytes) -> ParseResult:
+        """PDF 파싱 → ParseResult 반환"""
+        result_dict = parse_registry_pdf(pdf_buffer)
 
-    return masked
+        return ParseResult(
+            document_type="registry",
+            document_sub_type=result_dict.get("property_type", ""),
+            parser_version=self.parser_version(),
+            data=result_dict,
+            raw_text=result_dict.get("raw_text", ""),
+            errors=result_dict.get("errors", []),
+            confidence=1.0,
+        )
+
+    def mask_for_demo(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """등기부등본 전용 데모 마스킹"""
+        masked = copy.deepcopy(data)
+
+        # 표제부 면적은 첫 층만
+        if 'title_info' in masked and 'areas' in masked['title_info']:
+            masked['title_info']['areas'] = masked['title_info']['areas'][:1]
+
+        # 갑구 첫 항목만, 개인정보 마스킹
+        if 'section_a' in masked and masked['section_a']:
+            first_entry = masked['section_a'][0]
+            if first_entry.get('owner'):
+                owner = first_entry['owner']
+                if owner.get('name'):
+                    name = owner['name']
+                    owner['name'] = (
+                        name[0] + '*' * (len(name) - 2) + name[-1]
+                        if len(name) > 2 else name[0] + '*'
+                    )
+                owner['resident_number'] = '******-*******'
+                owner['address'] = '***' if owner.get('address') else None
+            masked['section_a'] = [first_entry]
+
+        # 을구 첫 항목만, 금액 숨김
+        if 'section_b' in masked and masked['section_b']:
+            first_entry = masked['section_b'][0]
+            first_entry['max_claim_amount'] = None
+            first_entry['deposit_amount'] = None
+            first_entry['mortgagee'] = None
+            first_entry['lessee'] = None
+            masked['section_b'] = [first_entry]
+
+        return masked

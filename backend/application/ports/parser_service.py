@@ -1,0 +1,16 @@
+"""문서 파서 포트 인터페이스"""
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List, Tuple
+
+
+class DocumentParserPort(ABC):
+    @abstractmethod
+    def parse(self, document_type: str, pdf_buffer: bytes, version: str = "latest") -> Dict[str, Any]: ...
+    @abstractmethod
+    def get_parser_version(self, document_type: str, version: str = "latest") -> str: ...
+    @abstractmethod
+    def list_document_types(self) -> List[str]: ...
+    @abstractmethod
+    def detect_type(self, pdf_buffer: bytes) -> Tuple[str, float]: ...
+    @abstractmethod
+    def mask_for_demo(self, document_type: str, data: Dict[str, Any]) -> Dict[str, Any]: ...
